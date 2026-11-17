@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Crypto Claude Desk - Multi-agent cryptocurrency intelligence system for Claude Code",
-    "version": "1.1.2"
+    "version": "2.0.0"
   },
   "plugins": [
     {
       "name": "crypto-trading-desk",
       "source": "./",
-      "description": "7 AI agents, 9 MCP servers (95 tools), cognitive learning, self-evolving platform. Zero orchestration code.",
-      "version": "1.1.2",
+      "description": "Multi-agent crypto intelligence desk V2: 9 specialized AI agents, 15 MCP servers (144 tools) covering exchanges, derivatives/options, macro, ETF flows, on-chain, news and quant analytics, persistent pending orders and kill switches, cognitive learning, and short action-first briefs. Paper trading.",
+      "version": "2.0.0",
       "category": "productivity"
     }
   ]

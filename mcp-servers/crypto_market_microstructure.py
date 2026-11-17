@@ -15,8 +15,9 @@ spread, slippage, and manipulation detection.
 """
 
 import ccxt
+from collections.abc import Mapping
 from fastmcp import FastMCP
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -24,6 +25,8 @@ import statistics
 import json
 import logging
 
+from desk_common import tool_serializer, get_exchange, exchange_priority, fetch_with_fallback
+from desk_common.exchanges import mark_blocked, _is_geo_block, _blocked as _BLOCKED_VENUES
 from validators import validate_symbol, validate_exchange, validate_positive_int
 
 logger = logging.getLogger(__name__)
@@ -31,30 +34,40 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 
 
-def _json_native(obj):
-    """Ultimo recurso del serializador (fix 2026-07-27, caso real 1 del Salon):
-    numpy.bool_/int64/float64 y arrays rompian la serializacion pydantic de
-    fastmcp (PydanticSerializationError: numpy.bool) y con ello la sesion stdio
-    quedaba inutilizable. item()/tolist() los vuelve tipos nativos; str() cubre
-    cualquier otro tipo exotico. Fail-open deliberado: mejor un string feo que
-    una tool muerta."""
-    if hasattr(obj, "tolist"):
-        return obj.tolist()  # arrays -> list; escalares numpy -> escalar nativo
-    if hasattr(obj, "item"):
-        return obj.item()
-    return str(obj)
+_tool_serializer = tool_serializer  # backwards-compatible alias
+
+mcp = FastMCP("crypto-market-microstructure", tool_serializer=tool_serializer)
+
+# Venues served by this server. Iteration / defaults follow
+# desk_common.exchange_priority() (OKX first; Binance/Bybit geo-block cloud IPs).
+SUPPORTED_VENUES = ["okx", "kraken", "coinbase", "kucoin", "mexc", "binance", "bybit"]
 
 
-def _tool_serializer(result) -> str:
-    return json.dumps(result, default=_json_native, ensure_ascii=False)
+class _ExchangeRegistry(Mapping):
+    """Lazy name -> ccxt instance mapping backed by desk_common.get_exchange."""
 
-mcp = FastMCP("crypto-market-microstructure", tool_serializer=_tool_serializer)
+    def __init__(self, names: List[str], market: str = "spot"):
+        self._names = list(names)
+        self._market = market
 
-# Reusable exchange instances
-EXCHANGES = {
-    'binance': ccxt.binance(),
-    'bybit': ccxt.bybit(),
-}
+    def __contains__(self, name) -> bool:
+        return isinstance(name, str) and name in self._names
+
+    def __getitem__(self, name: str):
+        if name not in self._names:
+            raise KeyError(name)
+        return get_exchange(name, self._market)
+
+    def __iter__(self):
+        prio = [n for n in exchange_priority(self._market) if n in self._names]
+        return iter(prio + [n for n in self._names if n not in prio])
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+
+EXCHANGES = _ExchangeRegistry(SUPPORTED_VENUES)
+
 
 # Orderbook analysis thresholds
 STRONG_LEVEL_MULTIPLIER = 2       # Volume > Nx avg = strong level
@@ -78,14 +91,46 @@ IMPACT_HIGH_PCT = 2.0            # Price impact < 2.0% = high
 
 
 def _get_exchange(exchange_name: str):
-    """Get exchange instance, defaulting to binance."""
-    return EXCHANGES.get(exchange_name, EXCHANGES['binance'])
+    """Get the ccxt instance for a supported venue (no silent substitution)."""
+    if exchange_name not in EXCHANGES:
+        raise ValueError(f"Unsupported exchange '{exchange_name}'. Supported: {list(EXCHANGES.keys())}")
+    return EXCHANGES[exchange_name]
+
+
+def _resolve_exchange(exchange: Optional[str]) -> str:
+    """Validate the venue; '' / 'auto' -> first non-geo-blocked venue in priority order."""
+    name = (exchange or "").strip().lower()
+    if name in ("", "auto", "default"):
+        names = list(EXCHANGES.keys())
+        prio = [n for n in exchange_priority("spot") if n in names] + names
+        return next((n for n in prio if n not in _BLOCKED_VENUES), prio[0])
+    return validate_exchange(name, supported=set(EXCHANGES.keys()))
+
+
+def _should_fallback(err: Exception) -> bool:
+    return _is_geo_block(err) or isinstance(err, (ccxt.NetworkError, ccxt.BadSymbol))
+
+
+def _venue_call(exchange: str, fn: Callable[[Any], Any]) -> Tuple[Any, str]:
+    """Run ``fn(ex)`` on the requested venue; on geo-block / network error / missing
+    symbol fall back through the priority list. Returns (result, exchange_used)."""
+    try:
+        return fn(_get_exchange(exchange)), exchange
+    except Exception as e:
+        if not _should_fallback(e):
+            raise
+        if _is_geo_block(e):
+            mark_blocked(exchange)
+        logger.warning("microstructure: %s failed (%s), falling back", exchange, e.__class__.__name__)
+    others = [n for n in EXCHANGES.keys() if n != exchange and n not in _BLOCKED_VENUES]
+    result, used, _errs = fetch_with_fallback(fn, exchanges=others, market="spot")
+    return result, used
 
 
 @mcp.tool()
 def analyze_orderbook_depth(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     depth_levels: int = 50
 ) -> Dict[str, Any]:
     """
@@ -93,7 +138,7 @@ def analyze_orderbook_depth(
 
     Args:
         symbol: Symbol (BTC, ETH, etc.)
-        exchange: Exchange (binance, bybit)
+        exchange: Exchange (okx default; kraken, coinbase, kucoin, mexc, binance, bybit). Falls back to the next reachable venue if geo-blocked; see exchange_used
         depth_levels: Depth levels to analyze (default 50)
 
     Returns:
@@ -101,13 +146,13 @@ def analyze_orderbook_depth(
     """
     try:
         symbol = validate_symbol(symbol)
-        exchange = validate_exchange(exchange, supported=set(EXCHANGES.keys()))
+        exchange = _resolve_exchange(exchange)
         depth_levels = validate_positive_int(depth_levels, "depth_levels", max_value=500)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = f"{symbol}/USDT"
 
-        orderbook = ex.fetch_order_book(formatted_symbol, limit=depth_levels)
+        orderbook, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_order_book(formatted_symbol, limit=depth_levels))
 
         bids = orderbook['bids'][:depth_levels]
         asks = orderbook['asks'][:depth_levels]
@@ -173,6 +218,7 @@ def analyze_orderbook_depth(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "timestamp": datetime.now().isoformat(),
             "mid_price": round(mid_price, 2),
@@ -215,7 +261,7 @@ def analyze_orderbook_depth(
 @mcp.tool()
 def detect_orderbook_imbalance(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     depth: int = 20
 ) -> Dict[str, Any]:
     """
@@ -234,13 +280,13 @@ def detect_orderbook_imbalance(
     """
     try:
         symbol = validate_symbol(symbol)
-        exchange = validate_exchange(exchange, supported=set(EXCHANGES.keys()))
+        exchange = _resolve_exchange(exchange)
         depth = validate_positive_int(depth, "depth", max_value=200)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = f"{symbol}/USDT"
 
-        orderbook = ex.fetch_order_book(formatted_symbol, limit=depth)
+        orderbook, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_order_book(formatted_symbol, limit=depth))
 
         bids = orderbook['bids'][:depth]
         asks = orderbook['asks'][:depth]
@@ -282,6 +328,7 @@ def detect_orderbook_imbalance(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "timestamp": datetime.now().isoformat(),
             "imbalances_by_level": imbalances,
@@ -306,7 +353,7 @@ def detect_orderbook_imbalance(
 @mcp.tool()
 def calculate_spread_metrics(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     order_size_usd: float = 10000
 ) -> Dict[str, Any]:
     """
@@ -322,12 +369,12 @@ def calculate_spread_metrics(
     """
     try:
         symbol = validate_symbol(symbol)
-        exchange = validate_exchange(exchange, supported=set(EXCHANGES.keys()))
+        exchange = _resolve_exchange(exchange)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = f"{symbol}/USDT"
 
-        orderbook = ex.fetch_order_book(formatted_symbol, limit=100)
+        orderbook, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_order_book(formatted_symbol, limit=100))
 
         bids = orderbook['bids']
         asks = orderbook['asks']
@@ -414,6 +461,7 @@ def calculate_spread_metrics(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "mid_price": round(mid_price, 2),
             "spread": {
@@ -447,7 +495,7 @@ def calculate_spread_metrics(
 @mcp.tool()
 def analyze_order_flow(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     limit: int = 100
 ) -> Dict[str, Any]:
     """
@@ -466,13 +514,13 @@ def analyze_order_flow(
     """
     try:
         symbol = validate_symbol(symbol)
-        exchange = validate_exchange(exchange, supported=set(EXCHANGES.keys()))
+        exchange = _resolve_exchange(exchange)
         limit = validate_positive_int(limit, "limit", max_value=1000)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = f"{symbol}/USDT"
 
-        trades = ex.fetch_trades(formatted_symbol, limit=limit)
+        trades, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_trades(formatted_symbol, limit=limit))
 
         if not trades:
             return {
@@ -544,6 +592,7 @@ def analyze_order_flow(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "timestamp": datetime.now().isoformat(),
             "trades_analyzed": limit,
@@ -582,7 +631,7 @@ def analyze_order_flow(
 @mcp.tool()
 def detect_spoofing_patterns(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     depth: int = 50,
     large_order_threshold_btc: float = 5.0
 ) -> Dict[str, Any]:
@@ -606,13 +655,13 @@ def detect_spoofing_patterns(
     """
     try:
         symbol = validate_symbol(symbol)
-        exchange = validate_exchange(exchange, supported=set(EXCHANGES.keys()))
+        exchange = _resolve_exchange(exchange)
         depth = validate_positive_int(depth, "depth", max_value=500)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = f"{symbol}/USDT"
 
-        orderbook = ex.fetch_order_book(formatted_symbol, limit=depth)
+        orderbook, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_order_book(formatted_symbol, limit=depth))
 
         bids = orderbook['bids']
         asks = orderbook['asks']
@@ -685,6 +734,7 @@ def detect_spoofing_patterns(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "timestamp": datetime.now().isoformat(),
             "spoofing_score": spoofing_score,
@@ -713,7 +763,7 @@ def detect_spoofing_patterns(
 @mcp.tool()
 def calculate_market_impact(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     order_size_usd: float = 100000
 ) -> Dict[str, Any]:
     """
@@ -731,12 +781,12 @@ def calculate_market_impact(
     """
     try:
         symbol = validate_symbol(symbol)
-        exchange = validate_exchange(exchange, supported=set(EXCHANGES.keys()))
+        exchange = _resolve_exchange(exchange)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = f"{symbol}/USDT"
 
-        orderbook = ex.fetch_order_book(formatted_symbol, limit=200)
+        orderbook, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_order_book(formatted_symbol, limit=200))
 
         bids = orderbook['bids']
         asks = orderbook['asks']
@@ -828,6 +878,7 @@ def calculate_market_impact(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "order_size_usd": order_size_usd,
             "mid_price": round(mid_price, 2),

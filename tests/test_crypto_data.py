@@ -81,12 +81,17 @@ TRENDING = {"coins": [{"item": {"id": "bitcoin", "symbol": "BTC", "name": "Bitco
 
 
 def _patch_get(json_data, status_code=200):
-    return patch("crypto_ultra_simple.requests.get", return_value=_mock_response(json_data, status_code))
+    """V2: the server goes through desk_common.http_get_json (cache + 429 backoff)."""
+    if status_code != 200:
+        from desk_common import HttpError
+        return patch("crypto_ultra_simple.http_get_json",
+                     side_effect=HttpError(f"HTTP {status_code}", status_code, "https://api.coingecko.com"))
+    return patch("crypto_ultra_simple.http_get_json", return_value=json_data)
 
 
 def _patch_get_error():
-    """Patch requests.get to raise an exception."""
-    return patch("crypto_ultra_simple.requests.get", side_effect=Exception("Network error"))
+    """Patch the HTTP layer to raise an exception."""
+    return patch("crypto_ultra_simple.http_get_json", side_effect=Exception("Network error"))
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +305,68 @@ class TestGetCryptoCategories:
             from crypto_ultra_simple import get_crypto_categories
             result = call_tool(get_crypto_categories, )
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# V2 regression tests — cached HTTP with backoff, optional demo/pro key headers
+# ---------------------------------------------------------------------------
+
+import crypto_ultra_simple as cg  # noqa: E402
+from desk_common import HttpError, tool_serializer  # noqa: E402
+
+_KEY_VARS = ("DESK_COINGECKO_KEY", "COINGECKO_API_KEY", "COINGECKO_KEY", "DESK_COINGECKO_PRO")
+
+
+@pytest.fixture
+def no_cg_env(monkeypatch):
+    for v in _KEY_VARS:
+        monkeypatch.delenv(v, raising=False)
+    return monkeypatch
+
+
+class TestCoinGeckoHttpLayer:
+    def test_no_key_sends_no_auth_header(self, no_cg_env):
+        with patch("crypto_ultra_simple.http_get_json", return_value=PRICE_RESPONSE) as mg:
+            call_tool(cg.get_bitcoin_price)
+        assert mg.call_args.args[0] == "https://api.coingecko.com/api/v3/simple/price"
+        assert mg.call_args.kwargs["headers"] is None
+        assert mg.call_args.kwargs["ttl"] > 0
+
+    def test_demo_key_header(self, no_cg_env):
+        no_cg_env.setenv("DESK_COINGECKO_KEY", "CG-demo123")
+        with patch("crypto_ultra_simple.http_get_json", return_value=GLOBAL_DATA) as mg:
+            call_tool(cg.get_global_market_stats)
+        assert mg.call_args.args[0] == "https://api.coingecko.com/api/v3/global"
+        assert mg.call_args.kwargs["headers"] == {"x-cg-demo-api-key": "CG-demo123"}
+
+    def test_pro_key_uses_pro_base_and_header(self, no_cg_env):
+        no_cg_env.setenv("DESK_COINGECKO_KEY", "CG-pro999")
+        no_cg_env.setenv("DESK_COINGECKO_PRO", "1")
+        with patch("crypto_ultra_simple.http_get_json", return_value=MARKET_RANKINGS) as mg:
+            call_tool(cg.get_market_rankings, 2)
+        assert mg.call_args.args[0] == "https://pro-api.coingecko.com/api/v3/coins/markets"
+        assert mg.call_args.kwargs["headers"] == {"x-cg-pro-api-key": "CG-pro999"}
+
+    def test_fear_greed_never_gets_coingecko_key(self, no_cg_env):
+        no_cg_env.setenv("DESK_COINGECKO_KEY", "CG-demo123")
+        with patch("crypto_ultra_simple.http_get_json", return_value=FEAR_GREED) as mg:
+            result = call_tool(cg.get_fear_greed_index)
+        assert result["status"] == "success"
+        assert mg.call_args.args[0].startswith("https://api.alternative.me/")
+        assert not mg.call_args.kwargs.get("headers")
+
+    def test_rate_limit_error_reported(self, no_cg_env):
+        with _patch_get(None, status_code=429):
+            result = call_tool(cg.get_market_trends)
+        assert result["status"] == "error"
+        assert result["error_type"] == "HttpError"
+
+    def test_none_changes_do_not_crash_sort(self, no_cg_env):
+        data = {"bitcoin": {"usd": 1, "usd_24h_change": None}, "ethereum": {"usd": 2, "usd_24h_change": 3.0}}
+        with patch("crypto_ultra_simple.http_get_json", return_value=data):
+            result = call_tool(cg.compare_crypto_performance, "bitcoin,ethereum")
+        assert result["status"] == "success"
+        assert result["best_performer_24h"]["coin_id"] == "ethereum"
+
+    def test_numpy_safe_serializer(self):
+        assert cg.mcp._tool_serializer is tool_serializer

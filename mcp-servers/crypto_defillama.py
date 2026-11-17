@@ -24,16 +24,18 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-import requests
 from fastmcp import FastMCP
+
+from desk_common import tool_serializer, http_get_json, HttpError
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("crypto-defillama")
+mcp = FastMCP("crypto-defillama", tool_serializer=tool_serializer)
 
 API_BASE = "https://api.llama.fi"
 STABLECOIN_BASE = "https://stablecoins.llama.fi"
 DEFAULT_TIMEOUT = 30  # Some DefiLlama endpoints (historical TVL, /overview/dexs) return large payloads
+DEFAULT_TTL = 600     # DefiLlama aggregates refresh ~hourly; 10 min cache avoids hammering it
 
 # Chain name normalization — DefiLlama is case-sensitive.
 CHAIN_ALIASES = {
@@ -65,11 +67,10 @@ def _normalize_chain(chain: str) -> str:
     return CHAIN_ALIASES.get(key, chain.strip().title())
 
 
-def _request(url: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[int] = None) -> Any:
-    """GET helper that raises on HTTP errors. Accepts per-call timeout override."""
-    resp = requests.get(url, params=params or {}, timeout=timeout or DEFAULT_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+def _request(url: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[int] = None,
+             ttl: float = DEFAULT_TTL) -> Any:
+    """Cached, retrying GET (desk_common.http_get_json). Raises HttpError on failure."""
+    return http_get_json(url, params=params or {}, ttl=ttl, timeout=timeout or DEFAULT_TIMEOUT)
 
 
 def _classify_change(pct: Optional[float]) -> str:

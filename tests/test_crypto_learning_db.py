@@ -44,9 +44,9 @@ class TestSchemaInit(TestCase):
         ]
         conn.close()
         expected = [
-            "patterns", "portfolio_state",
-            "predictions", "summaries",
-            "trade_modifications", "trades",
+            "kill_switches", "orders", "patterns", "portfolio_state",
+            "predictions", "regime_snapshots", "summaries",
+            "trade_modifications", "trades", "watchlist",
         ]
         self.assertEqual(tables, expected)
 

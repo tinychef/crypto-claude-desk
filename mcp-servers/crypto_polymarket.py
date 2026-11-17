@@ -7,10 +7,10 @@ No API keys required. Prediction markets give the "wisdom of crowds" probability
 for real-world events priced by capital — a strong alternative-data signal.
 
 6 Tools:
-1. search_markets - Full-text search across active markets
+1. search_markets - Full-text search across active markets (gamma /public-search)
 2. get_market_probabilities - Outcome probabilities for a specific market
 3. get_trending_markets - Most active markets by 24h volume
-4. get_crypto_markets - Markets tagged with crypto-related categories
+4. get_crypto_markets - Markets under the Polymarket "crypto" tag (tag_id)
 5. get_market_detail - Full detail for one market (description, dates, volume)
 6. get_top_volume_markets - Largest markets by total volume
 
@@ -22,15 +22,21 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import requests
 from fastmcp import FastMCP
+
+from desk_common import tool_serializer, http_get_json, HttpError
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("crypto-polymarket")
+mcp = FastMCP("crypto-polymarket", tool_serializer=tool_serializer)
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 DEFAULT_TIMEOUT = 15
+DEFAULT_TTL = 60          # market prices move; keep the cache short
+TAG_TTL = 86_400          # tag ids are stable
+
+# Known Gamma tag ids (used if /tags/slug/{slug} is unreachable). Verified live 2026-11.
+KNOWN_TAG_IDS = {"crypto": "21", "sports": "1"}
 
 # Categories that overlap with crypto trading decisions.
 CRYPTO_TAGS = {
@@ -43,12 +49,54 @@ PROB_HIGH_CONFIDENCE = 0.75
 PROB_LOW_CONFIDENCE = 0.25
 
 
-def _request(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    """Issue a GET against the Gamma API and return parsed JSON."""
+def _request(path: str, params: Optional[Dict[str, Any]] = None, ttl: float = DEFAULT_TTL) -> Any:
+    """GET against the Gamma API (cached + retried via desk_common) and return parsed JSON."""
     url = f"{GAMMA_BASE}{path}"
-    resp = requests.get(url, params=params or {}, timeout=DEFAULT_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+    return http_get_json(url, params=params or {}, ttl=ttl, timeout=DEFAULT_TIMEOUT)
+
+
+def _tag_id(label: str) -> Optional[str]:
+    """Resolve a category label/slug (e.g. "Crypto", "Sports") to a Gamma tag id."""
+    slug = label.strip().lower().replace(" ", "-")
+    try:
+        data = _request(f"/tags/slug/{slug}", ttl=TAG_TTL)
+        if isinstance(data, dict) and data.get("id") is not None:
+            return str(data["id"])
+    except HttpError as e:
+        if e.status == 404:
+            return KNOWN_TAG_IDS.get(slug)
+        logger.warning("tag lookup failed for %s: %s", slug, e)
+    except Exception as e:
+        logger.warning("tag lookup failed for %s: %s", slug, e)
+    return KNOWN_TAG_IDS.get(slug)
+
+
+def _as_list(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("data") or data.get("markets") or []
+    return []
+
+
+def _is_open(m: Dict[str, Any]) -> bool:
+    return bool(m.get("active", True)) and not m.get("closed", False)
+
+
+def _vol24(m: Dict[str, Any]) -> float:
+    for key in ("volume24hr", "volume24hrClob", "volumeNum", "volume"):
+        try:
+            v = float(m.get(key) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v:
+            return v
+    return 0.0
+
+
+def _matches(m: Dict[str, Any], terms: List[str]) -> bool:
+    hay = " ".join(str(m.get(k) or "") for k in ("question", "slug", "description", "groupItemTitle")).lower()
+    return all(t in hay for t in terms)
 
 
 def _parse_outcomes(market: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -149,22 +197,50 @@ def search_markets(query: str, limit: int = 10, active_only: bool = True) -> Dic
             raise ValueError("query must be a non-empty string")
         limit = _validate_limit(limit)
 
-        params: Dict[str, Any] = {
-            "limit": limit,
-            "order": "volume24hr",
-            "ascending": "false",
-        }
-        if active_only:
-            params["active"] = "true"
-            params["closed"] = "false"
+        q = query.strip()
 
-        data = _request("/markets", params={**params, "q": query.strip()})
-        markets = data if isinstance(data, list) else data.get("data", [])
+        # Gamma's /markets endpoint silently ignores `q` (V1 bug: it returned the global
+        # top-volume list for any query). /public-search does real full-text search and
+        # returns events with nested markets.
+        source = "public-search"
+        markets: List[Dict[str, Any]] = []
+        try:
+            params: Dict[str, Any] = {"q": q, "limit_per_type": limit}
+            if active_only:
+                params["events_status"] = "active"
+            data = _request("/public-search", params=params)
+            for event in (data.get("events") or []) if isinstance(data, dict) else []:
+                for m in event.get("markets") or []:
+                    m = dict(m)
+                    m.setdefault("eventTitle", event.get("title"))
+                    markets.append(m)
+        except Exception as e:
+            # Fallback: client-side filter over a large page of markets.
+            logger.warning("public-search failed (%s); falling back to client-side filter", e)
+            source = "markets-client-filter"
+            fparams: Dict[str, Any] = {"limit": 500, "order": "volume24hr", "ascending": "false"}
+            if active_only:
+                fparams["active"] = "true"
+                fparams["closed"] = "false"
+            terms = [t for t in q.lower().split() if t]
+            markets = [m for m in _as_list(_request("/markets", params=fparams)) if _matches(m, terms)]
+
+        if active_only:
+            markets = [m for m in markets if _is_open(m)]
+        seen, unique = set(), []
+        for m in sorted(markets, key=_vol24, reverse=True):
+            key = m.get("id") or m.get("slug")
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(m)
+        markets = unique[:limit]
 
         results = [_shape_market(m) for m in markets]
         return {
             "success": True,
             "query": query,
+            "source": source,
             "active_only": active_only,
             "count": len(results),
             "markets": results,
@@ -197,7 +273,7 @@ def get_market_probabilities(slug_or_id: str) -> Dict[str, Any]:
             data = _request("/markets", params={"id": key})
         else:
             data = _request("/markets", params={"slug": key})
-        markets = data if isinstance(data, list) else data.get("data", [])
+        markets = _as_list(data)
         if not markets:
             return {
                 "success": False,
@@ -244,14 +320,21 @@ def get_trending_markets(limit: int = 10, category: Optional[str] = None) -> Dic
             "order": "volume24hr",
             "ascending": "false",
         }
+        tag_id = None
         if category:
-            params["category"] = category
+            # Gamma ignores `category`; filtering works via the tag id.
+            tag_id = _tag_id(category)
+            if tag_id is None:
+                return {"success": False, "error": f"Unknown Polymarket category '{category}'",
+                        "error_type": "NotFound", "category": category}
+            params["tag_id"] = tag_id
 
         data = _request("/markets", params=params)
-        markets = data if isinstance(data, list) else data.get("data", [])
+        markets = _as_list(data)
         return {
             "success": True,
             "category": category,
+            "tag_id": tag_id,
             "count": len(markets),
             "markets": [_shape_market(m) for m in markets],
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -262,7 +345,7 @@ def get_trending_markets(limit: int = 10, category: Optional[str] = None) -> Dic
 
 
 @mcp.tool()
-def get_crypto_markets(limit: int = 20) -> Dict[str, Any]:
+def get_crypto_markets(limit: int = 20, include_intraday: bool = False) -> Dict[str, Any]:
     """
     Get currently active markets tagged with crypto-related categories.
 
@@ -271,36 +354,34 @@ def get_crypto_markets(limit: int = 20) -> Dict[str, Any]:
 
     Args:
         limit: Maximum markets to return (1-100, default 20)
+        include_intraday: Include 5-15 minute "Up or Down" binaries (default False)
 
     Returns:
-        Crypto-tagged markets with probabilities.
+        Crypto-tagged markets with probabilities, ordered by 24h volume.
     """
     try:
         limit = _validate_limit(limit)
+        # V1 passed `tag=crypto`, which Gamma ignores (it returned sports/politics markets).
+        # The working filter is `tag_id` (crypto = 21).
+        tag_id = _tag_id("crypto") or KNOWN_TAG_IDS["crypto"]
         params = {
-            "limit": limit,
+            "limit": min(limit * 3, 100) if not include_intraday else limit,
             "active": "true",
             "closed": "false",
             "order": "volume24hr",
             "ascending": "false",
-            "tag": "crypto",
+            "tag_id": tag_id,
         }
         data = _request("/markets", params=params)
-        markets = data if isinstance(data, list) else data.get("data", [])
-
-        # Best-effort filter: only keep those whose category/tags match known crypto labels.
-        filtered = []
-        for m in markets:
-            cat = (m.get("category") or "").strip()
-            if not cat or cat in CRYPTO_TAGS or any(t in (cat or "") for t in CRYPTO_TAGS):
-                filtered.append(_shape_market(m))
-
-        # If filter produced nothing meaningful, fall back to the raw list.
-        if not filtered:
-            filtered = [_shape_market(m) for m in markets]
+        markets = [m for m in _as_list(data) if _is_open(m)]
+        if not include_intraday:
+            # 5-15 minute "Up or Down" binaries are noise for desk decisions.
+            markets = [m for m in markets if "up or down" not in (m.get("question") or "").lower()]
+        filtered = [_shape_market(m) for m in markets[:limit]]
 
         return {
             "success": True,
+            "tag_id": tag_id,
             "count": len(filtered),
             "markets": filtered,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -328,7 +409,7 @@ def get_market_detail(slug: str) -> Dict[str, Any]:
         if not slug or not isinstance(slug, str):
             raise ValueError("slug must be a non-empty string")
         data = _request("/markets", params={"slug": slug.strip()})
-        markets = data if isinstance(data, list) else data.get("data", [])
+        markets = _as_list(data)
         if not markets:
             return {
                 "success": False,
@@ -374,7 +455,7 @@ def get_top_volume_markets(limit: int = 10) -> Dict[str, Any]:
             "ascending": "false",
         }
         data = _request("/markets", params=params)
-        markets = data if isinstance(data, list) else data.get("data", [])
+        markets = _as_list(data)
         return {
             "success": True,
             "count": len(markets),

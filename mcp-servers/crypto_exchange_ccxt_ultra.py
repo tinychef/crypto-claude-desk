@@ -2,65 +2,176 @@
 """
 Crypto Exchange CCXT Ultra Server
 Multi-exchange data: OHLCV, orderbooks, volume analysis, liquidity, arbitrage.
-Uses CCXT with reliable exchanges only - no API keys required.
+Public CCXT endpoints only - no API keys required.
+
+V2: every ccxt instance comes from ``desk_common.get_exchange`` (honors
+HTTPS_PROXY), venues are ordered by ``exchange_priority()`` (OKX first, since
+Binance/Bybit geo-block cloud IPs), and single-venue tools fall back to the
+next reachable venue when the requested one is geo-blocked/unreachable,
+reporting the venue actually used in ``exchange_used``.
 """
 
+from collections.abc import Mapping
 from fastmcp import FastMCP
 import ccxt
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Optional, Union
+from typing import Any, Callable, List, Dict, Optional, Tuple, Union
 import json
 from datetime import datetime, timedelta
 import time
 import logging
 
+from desk_common import tool_serializer, get_exchange, exchange_priority, fetch_with_fallback, spot_pair
+from desk_common.exchanges import mark_blocked, _is_geo_block, _blocked as _BLOCKED_VENUES
 from validators import validate_symbol, validate_exchange, validate_positive_int
 
 logger = logging.getLogger(__name__)
 
-# Initialize FastMCP server
+_tool_serializer = tool_serializer  # backwards-compatible alias
+
+mcp = FastMCP("crypto-exchange-ccxt-ultra", tool_serializer=tool_serializer)
+
+# Spot venues served by this server (public APIs only). Order is irrelevant:
+# iteration follows desk_common.exchange_priority() (DESK_EXCHANGES).
+SUPPORTED_VENUES = ["okx", "kraken", "coinbase", "kucoin", "mexc", "bitfinex", "binance"]
 
 
-def _json_native(obj):
-    """Ultimo recurso del serializador (fix 2026-07-27, caso real 1 del Salon):
-    numpy.bool_/int64/float64 y arrays rompian la serializacion pydantic de
-    fastmcp (PydanticSerializationError: numpy.bool) y con ello la sesion stdio
-    quedaba inutilizable. item()/tolist() los vuelve tipos nativos; str() cubre
-    cualquier otro tipo exotico. Fail-open deliberado: mejor un string feo que
-    una tool muerta."""
-    if hasattr(obj, "tolist"):
-        return obj.tolist()  # arrays -> list; escalares numpy -> escalar nativo
-    if hasattr(obj, "item"):
-        return obj.item()
-    return str(obj)
+class _ExchangeRegistry(Mapping):
+    """Lazy name -> ccxt instance mapping backed by desk_common.get_exchange.
+
+    Behaves like the V1 ``EXCHANGES`` dict (tests may patch it with a plain dict),
+    but builds proxy-aware cached instances on demand and iterates in priority order.
+    """
+
+    def __init__(self, names: List[str], market: str = "spot"):
+        self._names = list(names)
+        self._market = market
+
+    def _ordered(self) -> List[str]:
+        prio = exchange_priority(self._market)
+        ordered = [n for n in prio if n in self._names]
+        return ordered + [n for n in self._names if n not in ordered]
+
+    def __contains__(self, name) -> bool:
+        return isinstance(name, str) and name in self._names
+
+    def __getitem__(self, name: str):
+        if name not in self._names:
+            raise KeyError(name)
+        return get_exchange(name, self._market)
+
+    def __iter__(self):
+        return iter(self._ordered())
+
+    def __len__(self) -> int:
+        return len(self._names)
 
 
-def _tool_serializer(result) -> str:
-    return json.dumps(result, default=_json_native, ensure_ascii=False)
+EXCHANGES = _ExchangeRegistry(SUPPORTED_VENUES)
 
-mcp = FastMCP("crypto-exchange-ccxt-ultra", tool_serializer=_tool_serializer)
 
-# Initialize ONLY reliable exchanges (public APIs only)  
-EXCHANGES = {
-    'binance': ccxt.binance(),      # ⭐ EXCELLENT: 3,817 markets, 326ms
-    'kraken': ccxt.kraken(),        # ⭐ EXCELLENT: 1,156 markets, 341ms  
-    'bitfinex': ccxt.bitfinex(),    # ⭐ GOOD: 376 markets, 275ms
-    'kucoin': ccxt.kucoin(),        # ⭐ GOOD: 1,295 markets, 277ms
-    'mexc': ccxt.mexc(),            # ⭐ ACCEPTABLE: 2,994 markets, 833ms
-}
+def _ordered_venues() -> List[str]:
+    names = list(EXCHANGES.keys())
+    prio = [n for n in exchange_priority("spot") if n in names]
+    return prio + [n for n in names if n not in prio]
 
-# REMOVED PROBLEMATIC EXCHANGES:
-# - coinbase: fetchStatus() not supported + NoneType errors
-# - bybit: fetchStatus() not supported  
-# - huobi: API errors
-# - gateio: fetchStatus() not supported
-# - okx: Too slow (49+ seconds response time)
 
-# Set all exchanges to sandbox=False and enable rate limiting
-for exchange in EXCHANGES.values():
-    exchange.sandbox = False
-    exchange.rateLimit = 1200
+def _default_venue() -> str:
+    """First non-geo-blocked venue in priority order (okx by default)."""
+    ordered = _ordered_venues()
+    for name in ordered:
+        if name not in _BLOCKED_VENUES:
+            return name
+    return ordered[0]
+
+
+def _default_venues() -> List[str]:
+    """Venues for multi-exchange tools: all supported, known geo-blocked ones skipped."""
+    names = _ordered_venues()
+    reachable = [n for n in names if n not in _BLOCKED_VENUES]
+    return reachable or names
+
+
+def _split_venues(exchanges: Optional[List[str]]) -> Tuple[List[str], List[str]]:
+    """Normalize a user venue list -> (supported, unsupported). Never silently drops names."""
+    if exchanges is None:
+        return _default_venues(), []
+    if isinstance(exchanges, str):
+        exchanges = [e for e in exchanges.split(",")]
+    ok, bad = [], []
+    for name in exchanges:
+        n = str(name).strip().lower()
+        if not n:
+            continue
+        (ok if n in EXCHANGES else bad).append(n)
+    return ok, bad
+
+
+def _unsupported_msgs(bad: List[str]) -> List[str]:
+    return [f"{n}: unsupported exchange (available: {list(EXCHANGES.keys())})" for n in bad]
+
+
+def _norm_exchange(exchange: Optional[str]) -> str:
+    n = (exchange or "").strip().lower()
+    return _default_venue() if n in ("", "auto", "default") else n
+
+
+def _pair(symbol: str) -> str:
+    """'BTC' -> 'BTC/USDT'; full ccxt symbols are passed through unchanged."""
+    s = (symbol or "").strip()
+    if "/" in s:
+        return s.upper()
+    try:
+        return spot_pair(s)
+    except ValueError:
+        return s
+
+
+def _should_fallback(err: Exception) -> bool:
+    return _is_geo_block(err) or isinstance(err, (ccxt.NetworkError, ccxt.BadSymbol))
+
+
+def _venue_call(exchange: str, fn: Callable[[Any], Any]) -> Tuple[Any, str, Any, List[str]]:
+    """Run ``fn(ccxt_instance)`` on the requested venue; if it is geo-blocked /
+    unreachable / doesn't list the symbol, fall back through the priority list.
+
+    Returns (result, exchange_used, exchange_obj, fallback_errors).
+    """
+    ex = EXCHANGES[exchange]
+    try:
+        return fn(ex), exchange, ex, []
+    except Exception as e:
+        if not _should_fallback(e):
+            raise
+        if _is_geo_block(e):
+            mark_blocked(exchange)
+        first = f"{exchange}: {e.__class__.__name__}: {str(e)[:160]}"
+    holder: Dict[str, Any] = {}
+
+    def _wrapped(ex2):
+        holder["ex"] = ex2
+        return fn(ex2)
+
+    others = [n for n in _default_venues() if n != exchange]
+    result, used, errs = fetch_with_fallback(_wrapped, exchanges=others, market="spot")
+    return result, used, holder.get("ex"), [first] + errs
+
+
+def _venue_meta(requested: str, used: str, errors: List[str]) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {"exchange_used": used}
+    if used != requested:
+        meta["fallback_from"] = requested
+        meta["fallback_errors"] = errors[:5]
+    return meta
+
+
+def _unknown_exchange(exchange: str) -> dict:
+    return {
+        'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
+        'status': 'error'
+    }
+
 
 # Arbitrage and liquidity thresholds
 MIN_ARBITRAGE_PROFIT_PCT = 0.1       # Minimum 0.1% profit for arbitrage
@@ -98,7 +209,10 @@ def safe_get_price_data(exchange, symbol):
             'timestamp': ticker.get('timestamp')
         }
     except Exception as e:
-        return {'error': str(e)}
+        venue = getattr(exchange, 'id', None)
+        if isinstance(venue, str) and _is_geo_block(e):
+            mark_blocked(venue)
+        return {'error': f"{e.__class__.__name__}: {str(e)[:200]}"}
 
 def safe_get_orderbook(exchange, symbol, limit=20):
     """Safely get orderbook data with error handling"""
@@ -152,19 +266,18 @@ def get_exchange_prices(symbol: str = "BTC/USDT", exchanges: List[str] = None) -
     
     Args:
         symbol: Trading pair symbol (e.g., "BTC/USDT", "ETH/USDT")
-        exchanges: List of exchanges to query (default: all reliable ones)
+        exchanges: List of exchanges to query (default: all supported venues in
+            priority order okx, kraken, coinbase, ...; known geo-blocked venues skipped)
     
     Returns:
-        Dictionary with prices from each exchange and aggregated data
+        Dictionary with prices from each exchange and aggregated data. Unknown
+        exchange names are reported in ``errors`` (never silently dropped).
     """
-    if exchanges is None:
-        exchanges = list(EXCHANGES.keys())
-    
-    # Filter to only available exchanges
-    exchanges = [ex for ex in exchanges if ex in EXCHANGES]
+    symbol = _pair(symbol)
+    exchanges, unsupported = _split_venues(exchanges)
     
     results = {}
-    errors = []
+    errors = _unsupported_msgs(unsupported)
     
     for exchange_name in exchanges:
         exchange = EXCHANGES[exchange_name]
@@ -182,7 +295,7 @@ def get_exchange_prices(symbol: str = "BTC/USDT", exchanges: List[str] = None) -
         'exchanges': results,
         'errors': errors if errors else None,
         'total_exchanges': len(results),
-        'status': 'success'
+        'status': 'success' if results else 'error'
     }
 
 @mcp.tool()
@@ -196,13 +309,14 @@ def get_arbitrage_opportunities(symbol: str = "BTC/USDT") -> dict:
     Returns:
         Arbitrage opportunities with profit calculations
     """
+    symbol = _pair(symbol)
     try:
         results = {}
         prices = []
         
-        for exchange_name, exchange in EXCHANGES.items():
+        for exchange_name in _default_venues():
             try:
-                price_data = safe_get_price_data(exchange, symbol)
+                price_data = safe_get_price_data(EXCHANGES[exchange_name], symbol)
                 if 'error' not in price_data and price_data.get('price'):
                     results[exchange_name] = price_data
                     prices.append((exchange_name, price_data['price']))
@@ -255,7 +369,7 @@ def get_arbitrage_opportunities(symbol: str = "BTC/USDT") -> dict:
         }
 
 @mcp.tool()
-def get_orderbook_data(symbol: str = "BTC/USDT", exchange: str = "binance", limit: int = 20) -> dict:
+def get_orderbook_data(symbol: str = "BTC/USDT", exchange: str = "okx", limit: int = 20) -> dict:
     """
     Get order book data from a reliable exchange with comprehensive analysis.
     
@@ -267,30 +381,26 @@ def get_orderbook_data(symbol: str = "BTC/USDT", exchange: str = "binance", limi
     Returns:
         Order book data with liquidity analysis
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
-    exchange_obj = EXCHANGES[exchange]
+    symbol = _pair(symbol)
     
     try:
-        orderbook_data = safe_get_orderbook(exchange_obj, symbol, limit)
-        
-        if 'error' in orderbook_data:
-            return {
-                'symbol': symbol,
-                'exchange': exchange,
-                'error': orderbook_data['error'],
-                'status': 'error'
-            }
+        raw, used, _, fb = _venue_call(exchange, lambda ex: ex.fetch_order_book(symbol, limit))
+        orderbook_data = {
+            'bids': (raw.get('bids') or [])[:limit],
+            'asks': (raw.get('asks') or [])[:limit],
+            'timestamp': raw.get('timestamp'),
+        }
         
         analysis = calculate_liquidity_metrics(orderbook_data)
         
         return {
             'symbol': symbol,
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'orderbook': orderbook_data,
             'analysis': analysis,
             'status': 'success'
@@ -314,15 +424,14 @@ def get_exchange_volume(symbol: str = "BTC/USDT", exchanges: List[str] = None) -
         exchanges: List of exchanges to compare
     
     Returns:
-        Volume comparison with market share analysis
+        Volume comparison with market share analysis. Unknown exchange names are
+        reported in ``errors``.
     """
-    if exchanges is None:
-        exchanges = list(EXCHANGES.keys())
-    
-    exchanges = [ex for ex in exchanges if ex in EXCHANGES]
+    symbol = _pair(symbol)
+    exchanges, unsupported = _split_venues(exchanges)
     
     results = {}
-    errors = []
+    errors = _unsupported_msgs(unsupported)
     total_volume_usd = 0
     total_volume_base = 0
     
@@ -384,7 +493,7 @@ def get_exchange_volume(symbol: str = "BTC/USDT", exchanges: List[str] = None) -
     }
 
 @mcp.tool()
-def get_trading_pairs(exchange: str = "binance") -> dict:
+def get_trading_pairs(exchange: str = "okx") -> dict:
     """
     Get all available trading pairs for a reliable exchange.
     
@@ -394,15 +503,12 @@ def get_trading_pairs(exchange: str = "binance") -> dict:
     Returns:
         List of all trading pairs organized by quote currency
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
     try:
-        exchange_obj = EXCHANGES[exchange]
-        markets = exchange_obj.load_markets()
+        markets, used, exchange_obj, fb = _venue_call(exchange, lambda ex: ex.load_markets())
         
         # Organize pairs by quote currency
         pairs_by_quote = {}
@@ -435,6 +541,7 @@ def get_trading_pairs(exchange: str = "binance") -> dict:
         
         return {
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'total_pairs': len([m for m in markets.values() if m.get('active', True)]),
             'pairs_by_quote': pairs_by_quote,
             'top_base_currencies': top_base_currencies,
@@ -460,16 +567,19 @@ def compare_exchange_prices(symbol: str = "BTC/USDT") -> dict:
     Returns:
         Comprehensive price comparison and arbitrage analysis
     """
+    symbol = _pair(symbol)
     try:
         results = {}
         prices = []
         
-        for exchange_name, exchange in EXCHANGES.items():
+        for exchange_name in _default_venues():
             try:
-                price_data = safe_get_price_data(exchange, symbol)
+                price_data = safe_get_price_data(EXCHANGES[exchange_name], symbol)
                 if 'error' not in price_data and price_data.get('price'):
                     results[exchange_name] = price_data
                     prices.append(price_data['price'])
+                else:
+                    results[exchange_name] = {'error': price_data.get('error', 'no price')}
             except Exception as e:
                 results[exchange_name] = {'error': str(e)}
         
@@ -574,7 +684,7 @@ def get_exchange_status(random_string: str = "test") -> dict:
     }
 
 @mcp.tool()
-def fetch_ohlcv_data(timeframe: str = "1h", exchange: str = "binance", symbol: str = "BTC/USDT", 
+def fetch_ohlcv_data(timeframe: str = "1h", exchange: str = "okx", symbol: str = "BTC/USDT", 
                      since_hours_ago: int = 24, limit: int = 100) -> dict:
     """
     Fetch OHLCV (candlestick) data for technical analysis.
@@ -589,11 +699,9 @@ def fetch_ohlcv_data(timeframe: str = "1h", exchange: str = "binance", symbol: s
     Returns:
         OHLCV data with summary statistics
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
     if timeframe not in TIMEFRAMES:
         return {
@@ -601,14 +709,14 @@ def fetch_ohlcv_data(timeframe: str = "1h", exchange: str = "binance", symbol: s
             'status': 'error'
         }
     
+    symbol = _pair(symbol)
     try:
-        exchange_obj = EXCHANGES[exchange]
-        
         # Calculate since timestamp
         since_timestamp = int((datetime.now() - timedelta(hours=since_hours_ago)).timestamp() * 1000)
         
-        # Fetch OHLCV data
-        ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe, since_timestamp, limit)
+        # Fetch OHLCV data (falls back to the next venue if geo-blocked)
+        ohlcv, used, _, fb = _venue_call(
+            exchange, lambda ex: ex.fetch_ohlcv(symbol, timeframe, since_timestamp, limit))
         
         if not ohlcv:
             return {
@@ -660,6 +768,7 @@ def fetch_ohlcv_data(timeframe: str = "1h", exchange: str = "binance", symbol: s
         return {
             'symbol': symbol,
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'timeframe': timeframe,
             'timeframe_description': TIMEFRAMES[timeframe],
             'candles': candles,
@@ -677,7 +786,7 @@ def fetch_ohlcv_data(timeframe: str = "1h", exchange: str = "binance", symbol: s
         }
 
 @mcp.tool()
-def fetch_multiple_timeframes(exchange: str = "binance", symbol: str = "BTC/USDT", 
+def fetch_multiple_timeframes(exchange: str = "okx", symbol: str = "BTC/USDT", 
                              timeframes: List[str] = None) -> dict:
     """
     Fetch OHLCV data for multiple timeframes for comprehensive analysis.
@@ -693,23 +802,28 @@ def fetch_multiple_timeframes(exchange: str = "binance", symbol: str = "BTC/USDT
     if timeframes is None:
         timeframes = ['5m', '15m', '1h', '4h', '1d']
     
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
+    symbol = _pair(symbol)
     try:
-        exchange_obj = EXCHANGES[exchange]
         results = {}
+        valid_tfs = [tf for tf in timeframes if tf in TIMEFRAMES]
+        if not valid_tfs:
+            return {'symbol': symbol, 'exchange': exchange,
+                    'error': f'No supported timeframes in {timeframes}', 'status': 'error'}
+        # Probe with the first timeframe to pick a reachable venue (fallback if geo-blocked)
+        first_ohlcv, used, exchange_obj, fb = _venue_call(
+            exchange, lambda ex: ex.fetch_ohlcv(symbol, valid_tfs[0], None, 100))
         
-        for timeframe in timeframes:
-            if timeframe not in TIMEFRAMES:
-                continue
-                
+        for timeframe in valid_tfs:
             try:
                 # Fetch last 100 candles for each timeframe
-                ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe, None, 100)
+                if timeframe == valid_tfs[0]:
+                    ohlcv = first_ohlcv
+                else:
+                    ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe, None, 100)
                 
                 if ohlcv:
                     # Get latest candle info
@@ -749,6 +863,7 @@ def fetch_multiple_timeframes(exchange: str = "binance", symbol: str = "BTC/USDT
         return {
             'symbol': symbol,
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'timeframe_analysis': results,
             'successful_timeframes': len(results),
             'status': 'success'
@@ -763,7 +878,7 @@ def fetch_multiple_timeframes(exchange: str = "binance", symbol: str = "BTC/USDT
         }
 
 @mcp.tool()
-def fetch_recent_trades(exchange: str = "binance", symbol: str = "BTC/USDT", limit: int = 50) -> dict:
+def fetch_recent_trades(exchange: str = "okx", symbol: str = "BTC/USDT", limit: int = 50) -> dict:
     """
     Fetch recent trades data for market microstructure analysis.
     
@@ -775,15 +890,13 @@ def fetch_recent_trades(exchange: str = "binance", symbol: str = "BTC/USDT", lim
     Returns:
         Recent trades with market sentiment analysis
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
+    symbol = _pair(symbol)
     try:
-        exchange_obj = EXCHANGES[exchange]
-        trades = exchange_obj.fetch_trades(symbol, None, limit)
+        trades, used, _, fb = _venue_call(exchange, lambda ex: ex.fetch_trades(symbol, None, limit))
         
         if not trades:
             return {
@@ -871,6 +984,7 @@ def fetch_recent_trades(exchange: str = "binance", symbol: str = "BTC/USDT", lim
         return {
             'symbol': symbol,
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'trades': formatted_trades,
             'analysis': analysis,
             'status': 'success'
@@ -885,7 +999,7 @@ def fetch_recent_trades(exchange: str = "binance", symbol: str = "BTC/USDT", lim
         }
 
 @mcp.tool()
-def get_exchange_markets_info(exchange: str = "binance") -> dict:
+def get_exchange_markets_info(exchange: str = "okx") -> dict:
     """
     Get comprehensive markets information for a reliable exchange.
     
@@ -895,15 +1009,12 @@ def get_exchange_markets_info(exchange: str = "binance") -> dict:
     Returns:
         Comprehensive market information and statistics
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
     try:
-        exchange_obj = EXCHANGES[exchange]
-        markets = exchange_obj.load_markets()
+        markets, used, exchange_obj, fb = _venue_call(exchange, lambda ex: ex.load_markets())
         
         # Count market types
         spot_count = 0
@@ -958,6 +1069,7 @@ def get_exchange_markets_info(exchange: str = "binance") -> dict:
         
         return {
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'markets_summary': {
                 'total_markets': len(markets),
                 'active_markets': active_count,
@@ -994,7 +1106,7 @@ def get_exchange_markets_info(exchange: str = "binance") -> dict:
         }
 
 @mcp.tool()
-def get_all_tickers(exchange: str = "binance", quote_currency: str = "USDT", limit: int = 50) -> dict:
+def get_all_tickers(exchange: str = "okx", quote_currency: str = "USDT", limit: int = 50) -> dict:
     """
     Get all tickers for a reliable exchange filtered by quote currency.
     
@@ -1006,15 +1118,12 @@ def get_all_tickers(exchange: str = "binance", quote_currency: str = "USDT", lim
     Returns:
         Filtered tickers with market overview
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
     try:
-        exchange_obj = EXCHANGES[exchange]
-        tickers = exchange_obj.fetch_tickers()
+        tickers, used, _, fb = _venue_call(exchange, lambda ex: ex.fetch_tickers())
         
         # Filter by quote currency
         filtered_tickers = {}
@@ -1025,7 +1134,7 @@ def get_all_tickers(exchange: str = "binance", quote_currency: str = "USDT", lim
         
         # Sort by volume and limit
         sorted_tickers = dict(sorted(filtered_tickers.items(), 
-                                   key=lambda x: x[1].get('quoteVolume', 0), 
+                                   key=lambda x: x[1].get('quoteVolume') or 0, 
                                    reverse=True)[:limit])
         
         # Calculate market overview
@@ -1034,7 +1143,7 @@ def get_all_tickers(exchange: str = "binance", quote_currency: str = "USDT", lim
         neutral_count = 0
         
         for ticker in sorted_tickers.values():
-            change = ticker.get('percentage', 0)
+            change = ticker.get('percentage') or 0
             if change > 0:
                 positive_count += 1
             elif change < 0:
@@ -1053,14 +1162,15 @@ def get_all_tickers(exchange: str = "binance", quote_currency: str = "USDT", lim
         
         # Get top performers
         gainers = dict(sorted(filtered_tickers.items(), 
-                            key=lambda x: x[1].get('percentage', 0), 
+                            key=lambda x: x[1].get('percentage') or 0, 
                             reverse=True)[:5])
         
         losers = dict(sorted(filtered_tickers.items(), 
-                           key=lambda x: x[1].get('percentage', 0))[:5])
+                           key=lambda x: x[1].get('percentage') or 0)[:5])
         
         return {
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'quote_currency': quote_currency,
             'tickers': sorted_tickers,
             'market_overview': {
@@ -1085,7 +1195,7 @@ def get_all_tickers(exchange: str = "binance", quote_currency: str = "USDT", lim
         }
 
 @mcp.tool()
-def analyze_volume_patterns(exchange: str = "binance", symbol: str = "BTC/USDT", 
+def analyze_volume_patterns(exchange: str = "okx", symbol: str = "BTC/USDT", 
                            timeframe: str = "1h", periods: int = 24) -> dict:
     """
     Analyze volume patterns and anomalies.
@@ -1099,15 +1209,13 @@ def analyze_volume_patterns(exchange: str = "binance", symbol: str = "BTC/USDT",
     Returns:
         Volume pattern analysis with anomaly detection
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
+    symbol = _pair(symbol)
     try:
-        exchange_obj = EXCHANGES[exchange]
-        ohlcv = exchange_obj.fetch_ohlcv(symbol, timeframe, None, periods)
+        ohlcv, used, _, fb = _venue_call(exchange, lambda ex: ex.fetch_ohlcv(symbol, timeframe, None, periods))
         
         if len(ohlcv) < 10:
             return {
@@ -1176,6 +1284,7 @@ def analyze_volume_patterns(exchange: str = "binance", symbol: str = "BTC/USDT",
         return {
             'symbol': symbol,
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'timeframe': timeframe,
             'periods_analyzed': len(volumes),
             'volume_statistics': {
@@ -1218,16 +1327,15 @@ def get_cross_exchange_liquidity(symbol: str = "BTC/USDT", exchanges: List[str] 
         exchanges: List of exchanges to analyze
     
     Returns:
-        Cross-exchange liquidity analysis
+        Cross-exchange liquidity analysis. Unknown exchange names are reported
+        in ``unsupported_exchanges``.
     """
-    if exchanges is None:
-        exchanges = list(EXCHANGES.keys())
+    symbol = _pair(symbol)
+    exchanges, unsupported = _split_venues(exchanges)
     
-    exchanges = [ex for ex in exchanges if ex in EXCHANGES]
-    
-    liquidity_data = {}
+    liquidity_data = {n: {'error': 'unsupported exchange'} for n in unsupported}
     successful_exchanges = 0
-    failed_exchanges = 0
+    failed_exchanges = len(unsupported)
     total_liquidity = 0
     
     for exchange_name in exchanges:
@@ -1326,7 +1434,7 @@ def get_cross_exchange_liquidity(symbol: str = "BTC/USDT", exchanges: List[str] 
         }
 
 @mcp.tool()
-def get_market_depth_analysis(exchange: str = "binance", symbol: str = "BTC/USDT", 
+def get_market_depth_analysis(exchange: str = "okx", symbol: str = "BTC/USDT", 
                              depth_levels: int = 50) -> dict:
     """
     Deep market microstructure analysis.
@@ -1339,15 +1447,13 @@ def get_market_depth_analysis(exchange: str = "binance", symbol: str = "BTC/USDT
     Returns:
         Comprehensive market depth analysis
     """
+    exchange = _norm_exchange(exchange)
     if exchange not in EXCHANGES:
-        return {
-            'error': f'Exchange {exchange} not available. Available: {list(EXCHANGES.keys())}',
-            'status': 'error'
-        }
+        return _unknown_exchange(exchange)
     
+    symbol = _pair(symbol)
     try:
-        exchange_obj = EXCHANGES[exchange]
-        orderbook = exchange_obj.fetch_order_book(symbol, depth_levels)
+        orderbook, used, _, fb = _venue_call(exchange, lambda ex: ex.fetch_order_book(symbol, depth_levels))
         
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
@@ -1453,6 +1559,7 @@ def get_market_depth_analysis(exchange: str = "binance", symbol: str = "BTC/USDT
         return {
             'symbol': symbol,
             'exchange': exchange,
+            **_venue_meta(exchange, used, fb),
             'mid_price': round(mid_price, 2),
             'order_book_summary': {
                 'total_bid_volume': round(total_bid_volume, 4),

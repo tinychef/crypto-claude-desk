@@ -2,37 +2,86 @@
   "mcpServers": {
     "crypto-data": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_ultra_simple.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_ultra_simple.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-exchange": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_exchange_ccxt_ultra.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_exchange_ccxt_ultra.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-technical": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_technical_analysis.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_technical_analysis.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-futures": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_futures_data.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_futures_data.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-advanced-indicators": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_advanced_indicators.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_advanced_indicators.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-market-microstructure": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_market_microstructure.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_market_microstructure.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-learning-db": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_learning_db.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_learning_db.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}",
       "env": {
         "_comment": "Optional: set CRYPTO_DB_DIR to an absolute path if you want the SQLite DB in your project rather than the plugin cache. Without it, the server walks up from PWD looking for an existing data/db/learning.db before falling back to the plugin-relative path."
@@ -40,12 +89,98 @@
     },
     "crypto-polymarket": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_polymarket.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_polymarket.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     },
     "crypto-defillama": {
       "command": "uv",
-      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_defillama.py"],
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_defillama.py"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "crypto-derivatives": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_derivatives.py"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "crypto-macro": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_macro.py"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "crypto-flows": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_flows.py"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "crypto-onchain": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_onchain.py"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "crypto-intel": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_intel.py"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "crypto-quant": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--frozen",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "python",
+        "${CLAUDE_PLUGIN_ROOT}/mcp-servers/crypto_quant.py"
+      ],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     }
   }

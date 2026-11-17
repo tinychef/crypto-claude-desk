@@ -1,11 +1,11 @@
 {
   "name": "crypto-trading-desk",
-  "version": "1.1.2",
-  "description": "Multi-agent cryptocurrency intelligence system with 7 specialized AI agents, 9 MCP servers (95 tools), cognitive learning, and self-evolving capabilities for comprehensive market analysis and paper trading.",
+  "version": "2.0.0",
+  "description": "Multi-agent crypto intelligence desk V2: 9 specialized AI agents, 15 MCP servers (144 tools) covering exchanges, derivatives/options, macro, ETF flows, on-chain, news and quant analytics, persistent pending orders and kill switches, cognitive learning, and short action-first briefs. Paper trading.",
   "author": {
     "name": "Crypto Trading Desk Contributors"
   },
-  "repository": "https://github.com/hugoguerrap/crypto-claude-desk",
+  "repository": "https://github.com/tinychef/crypto-claude-desk",
   "license": "MIT",
   "keywords": [
     "crypto",

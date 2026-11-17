@@ -1,96 +1,45 @@
 ---
 name: monitor
-description: Autonomous monitoring loop. Checks open trades against SL/TP levels, closes trades that hit targets, evaluates expired predictions, and generates periodic summaries. Run via cron for full autonomy. Usage: /monitor
+description: Autonomous monitoring loop. Checks open trades against SL/TP, fills/expires pending orders, evaluates kill switches, records a regime snapshot, validates expired predictions and generates periodic summaries. Run via cron for full autonomy. Usage: /monitor
 user-invocable: true
 ---
 
-# Monitor - Autonomous Learning Loop
+# Monitor — autonomous loop
 
-Closes the autonomous loop: check trades, close hits, evaluate predictions, generate summaries.
+Every agent: Task with `subagent_type: general-purpose` + explicit `model`; every prompt ends with "Follow docs/output-format.md. Do NOT use the Edit tool."
 
-**All agents use `subagent_type: general-purpose`** with explicit `model` to ensure MCP tool access. Include "Do NOT use the Edit tool" in every prompt.
+## Step 1: Snapshot (one agent)
+`model: haiku` — "You are the market-monitor agent.
+1. From crypto-learning-db: get_portfolio_state(), list_orders(status='pending'), list_kill_switches(). Collect every symbol with an open trade or pending order, plus BTC.
+2. Prices for each symbol: get_exchange_prices (crypto-exchange). BTC: also the last COMPLETED daily close (fetch_ohlcv_data timeframe='1d', limit=3) and the last completed weekly close if any kill switch uses it.
+3. Regime data: classify_regime('BTC') and market_breadth() (crypto-quant), get_fear_greed_index() (crypto-data), get_funding_rate('BTC', exchange='okx') (crypto-futures).
+4. Call record_regime_snapshot(btc_price, regime, breadth_score, fear_greed, btc_funding) ONCE.
+Return JSON only: {prices: {'BTC/USDT': ..}, metrics: {btc_price, btc_daily_close, btc_weekly_close, btc_funding, fear_greed, futures_realized_loss, <SYMBOL>_price...}, regime, open_trades: [...], pending_orders: [...], kill_switches: [...]}."
 
-## Workflow
+## Step 2: Kill switches first
+If any active kill switches: `model: sonnet` — "You are the portfolio-manager agent. Call evaluate_kill_switches(metrics='<metrics JSON from Step 1>'). For each triggered switch, execute its action_text within its scope: cancel_order(order_id, reason='kill switch <id>: <rule>') for pending orders; close_trade(trade_id, exit_price=<current price>, close_reason='kill switch <id>: <rule>') for open trades; then trigger_kill_switch(kill_switch_id). Report missing_metrics. Return what was triggered, cancelled and closed."
 
-### Step 1: Get Current Prices
-Delegate using Task with `subagent_type: general-purpose`, `model: haiku`:
+## Step 3: Open trades vs SL/TP
+For each open trade (long: SL hit if price ≤ stop_loss, TP if ≥ take_profit; short: inverse):
+- Hit → `model: opus` portfolio-manager: "Close {trade_id} at {price}: close_trade(trade_id, exit_price, close_reason='{SL|TP} hit at {level}')."
+- Profitable and not closed → `model: sonnet` risk-specialist: "Trade {trade_id} ({symbol} {side}) entry {entry}, now {price}, SL {sl}, TP {tp}. Use volatility_regime (crypto-quant) and get_support_resistance (crypto-technical). Trail only in the profitable direction, never widen, keep the SL ≥ 1×ATR from price. If adjusting: update_trade(trade_id, stop_loss, notes='<why>')."
 
-"You are the market-monitor agent. Get current prices for ALL symbols that have open trades.
-Call get_portfolio_state() from crypto-learning-db first to see which symbols have open positions.
-Then use get_exchange_prices(symbol=...) from crypto-exchange MCP to get live prices for each symbol.
-Return a JSON object like: {\"BTC/USDT\": 98500, \"ETH/USDT\": 3200}
-Do NOT use the Edit tool."
+## Step 4: Pending orders
+If pending orders exist: `model: sonnet` portfolio-manager: "Call check_orders(prices='<prices JSON>'). For each `triggered` order call fill_order(order_id, fill_price=<suggested_fill_price>) — it creates the trade and attaches the order's predictions. For `needs_review` (conditional) orders, judge condition_text against the data and fill or leave. Then expire_orders(). Return filled (order → trade IDs) and expired IDs."
+For each fill → `model: opus` learning-agent: "Order {order_id} filled as {trade_id}. Its order predictions are already attached; add only what they miss (Mission 2, source='trade')."
 
-### Step 2: Check Open Trades Against SL/TP
-Using the prices from Step 1 and the open trades from get_portfolio_state():
+## Step 5: Learning
+- Each trade closed in Steps 2-3 → `model: opus` learning-agent: "Post-mortem for {trade_id} (Mission 4): validate its predictions, upsert_pattern, write the post-mortem file."
+- Always → `model: opus` learning-agent: "find_expired_predictions(current_prices='<prices JSON>') and validate each (Mission 3), including predictions without trade_id and orders that expired unfilled."
+- Last 2 days of month → also "generate_summary(summary_type='monthly')" (and 'quarterly' at quarter end).
 
-For each open trade, check:
-- **Long trade**: Did price drop to or below `stop_loss`? Did price rise to or above `take_profit`?
-- **Short trade**: Did price rise to or above `stop_loss`? Did price drop to or below `take_profit`?
-
-If SL or TP was hit, delegate using Task with `subagent_type: general-purpose`, `model: opus`:
-
-"You are the portfolio-manager agent. Close trade {trade_id}. Current price is ${price}. The {SL/TP} at ${level} was hit.
-Call close_trade(trade_id='{trade_id}', exit_price={price}, close_reason='{SL/TP} hit at ${level}') from crypto-learning-db.
-Do NOT use the Edit tool."
-
-### Step 2b: Trailing Stop Adjustment
-For open trades that were NOT closed (still active), check if the trade is profitable:
-- **Long**: current price > entry_price
-- **Short**: current price < entry_price
-
-If profitable AND the current stop_loss hasn't been optimally trailed, delegate using Task with `subagent_type: general-purpose`, `model: sonnet`:
-
-"You are the risk-specialist agent. Read agents/risk-specialist.md for context.
-Trade {trade_id} ({symbol}, {side}) is profitable. Entry: ${entry}, Current: ${price}, SL: ${stop_loss}, TP: ${take_profit}.
-Analyze whether to trail the stop-loss. Use calculate_volatility(symbol=...) and get_support_resistance(symbol=...) from crypto-technical MCP.
-If you recommend adjusting, call update_trade(trade_id='{trade_id}', stop_loss={new_sl}, notes='your reasoning') from crypto-learning-db.
-Rules: only trail in profitable direction, never widen the stop, leave room for normal volatility.
-Do NOT use the Edit tool."
-
-### Step 3: Post-Mortem for Closed Trades
-For each trade closed in Step 2, delegate using Task with `subagent_type: general-purpose`, `model: opus`:
-
-"You are the learning-agent. Read agents/learning-agent.md for your analysis framework.
-Trade {trade_id} was just closed ({result}, PnL: {pnl}). Do a full post-mortem:
-1. Call query_predictions(trade_id='{trade_id}') from crypto-learning-db to find all predictions
-2. For each pending prediction, evaluate: read the original, compare to what happened, write a detailed NL evaluation
-3. Call validate_prediction() with your evaluation for each one
-4. Call upsert_pattern() if you identify a named pattern
-5. Write a post-mortem report to data/reports/
-Do NOT use the Edit tool."
-
-### Step 4: Evaluate Expired Predictions
-Delegate using Task with `subagent_type: general-purpose`, `model: opus`:
-
-"You are the learning-agent. Call find_expired_predictions(current_prices='{prices_json}') from crypto-learning-db using the current prices.
-For each expired prediction:
-1. Read the original prediction text
-2. Compare to the current price / market state
-3. Write a natural language evaluation explaining how close it was and why
-4. Call validate_prediction() with your evaluation
-Do NOT use the Edit tool."
-
-### Step 5: Monthly Summary (conditional)
-Check if today is the last day of the month (or within 2 days of month end).
-If yes, delegate using Task with `subagent_type: general-purpose`, `model: opus`:
-
-"You are the learning-agent. Generate a monthly summary.
-Call generate_summary(summary_type='monthly') from crypto-learning-db.
-Also check if it's end of quarter — if so, call generate_summary(summary_type='quarterly') too.
-Do NOT use the Edit tool."
-
-### Step 6: Report
-Present a summary of what happened:
+## Step 6: Report (≤15 lines, Spanish)
 ```
-## Monitor Report
-
-**Open Trades:** X active
-**Trades Closed This Run:** X (list with PnL)
-**Predictions Evaluated:** X expired validated
-**Summary Generated:** Yes/No
-
-### Next Actions
-- [Any trades approaching SL/TP levels]
-- [Any concerning patterns noticed]
+## Monitor — {fecha hora UTC}
+Régimen: {regime} · BTC {price} (cierre diario {close}) · F&G {n} · funding {x}%
+Trades abiertos: N · cerrados ahora: {id PnL, ...}
+Órdenes: N pendientes · ejecutadas: {id→trade} · caducadas: {ids}
+Kill switches: {disparados + acción | ninguno}
+Predicciones validadas: N (✓x / ✗y)
+Próximo a vigilar: {orden/trade más cerca de su nivel, distancia %}
 ```

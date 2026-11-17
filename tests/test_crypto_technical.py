@@ -267,9 +267,11 @@ class TestGetSupportResistance:
         with _patch_fetch():
             from crypto_technical_analysis import get_support_resistance
             result = call_tool(get_support_resistance, "BTC")
-        if result.get("resistance_levels"):
-            strengths = [r["strength"] for r in result["resistance_levels"]]
-            assert strengths == sorted(strengths, reverse=True)
+        # V2 contract: nearest level first (resistance ascending, support descending)
+        res = [r["price"] for r in result["resistance_levels"]]
+        sup = [r["price"] for r in result["support_levels"]]
+        assert res == sorted(res)
+        assert sup == sorted(sup, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -512,3 +514,165 @@ class TestBacktestStrategy:
             from crypto_technical_analysis import backtest_strategy
             result = call_tool(backtest_strategy, "BTC", "rsi_oversold", "3m", 50000)
         assert result["initial_capital"] == 50000
+
+
+# ---------------------------------------------------------------------------
+# V2 regression tests — typed S/R pivots, priority OHLCV fetch, flagged CoinGecko fallback
+# ---------------------------------------------------------------------------
+
+import crypto_technical_analysis as ta  # noqa: E402
+
+
+def _wave_df():
+    """Range 100-120 for 80 bars (swing lows ~100, swing highs ~120), then a breakdown to ~90.
+
+    V1 bug: swing lows at ~100 (now ABOVE price) were returned as support, and swing lows of
+    the HIGH series leaked into resistance.
+    """
+    n_range, n_drop = 80, 20
+    x = np.arange(n_range)
+    mid = 110 + 10 * np.sin(2 * np.pi * x / 16)
+    drop = np.linspace(mid[-1], 90, n_drop)
+    close = np.concatenate([mid, drop])
+    # a deeper old swing low at 85 (true support below 90)
+    close[8] = 85
+    high = close * 1.004
+    low = close * 0.996
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=len(close), freq="1D"),
+        "open": close, "high": high, "low": low, "close": close,
+        "volume": np.full(len(close), 1000.0),
+    })
+
+
+class TestSupportResistanceRegression:
+    def _run(self, df):
+        with patch("crypto_technical_analysis.safe_fetch_ohlcv_data", return_value=df):
+            return call_tool(ta.get_support_resistance, "BTC", 100)
+
+    def test_supports_below_and_resistances_above_price(self):
+        result = self._run(_wave_df())
+        price = result["current_price"]
+        assert all(s["price"] < price for s in result["support_levels"])
+        assert all(r["price"] > price for r in result["resistance_levels"])
+        assert result["resistance_levels"], "range lows/highs above price must yield resistance"
+
+    def test_sorted_nearest_first(self):
+        for df in (_wave_df(), MOCK_DF.copy()):
+            result = self._run(df)
+            sup = [s["price"] for s in result["support_levels"]]
+            res = [r["price"] for r in result["resistance_levels"]]
+            assert sup == sorted(sup, reverse=True)
+            assert res == sorted(res)
+            if result["next_support"]:
+                assert result["next_support"] == result["support_levels"][0]
+            if result["next_resistance"]:
+                assert result["next_resistance"] == result["resistance_levels"][0]
+
+    def test_pivots_are_typed(self):
+        df = _wave_df()
+        result = self._run(df)
+        highs = ta._swing_points(df["high"], result["pivot_window"], "high")
+        lows = ta._swing_points(df["low"], result["pivot_window"], "low")
+        for r in result["resistance_levels"]:
+            assert any(abs(r["price"] - p) / p <= 0.021 for _, p in highs)
+        for s in result["support_levels"]:
+            assert any(abs(s["price"] - p) / p <= 0.021 for _, p in lows)
+        # broken range lows (~100, above price) are reported separately, never as support
+        assert result["broken_support"]
+        assert all(b["price"] > result["current_price"] for b in result["broken_support"])
+
+    def test_swing_points_only_extremes(self):
+        s = pd.Series([1, 2, 3, 2, 1, 2, 3, 2, 1, 2, 3])
+        assert ta._swing_points(s, 2, "high") == [(2, 3.0), (6, 3.0)]
+        assert ta._swing_points(s, 2, "low") == [(4, 1.0), (8, 1.0)]
+
+
+def _rows(n=50, last_ts_ms=None, step_ms=86_400_000):
+    import time as _t
+    last = last_ts_ms or int(_t.time() * 1000)
+    start = last - (n - 1) * step_ms
+    return [[start + i * step_ms, 100 + i, 101 + i, 99 + i, 100.5 + i, 10.0 + i] for i in range(n)]
+
+
+class TestOHLCVFetchPriority:
+    def test_uses_priority_fallback_and_latest_candles(self):
+        ex = MagicMock()
+        ex.fetch_ohlcv.return_value = _rows()
+        with patch("crypto_technical_analysis.fetch_with_fallback",
+                   side_effect=lambda fn, exchanges=None, market="spot": (fn(ex), "okx", [])) as fwf:
+            df = ta.safe_fetch_ohlcv_data("eth", 50)
+        assert fwf.call_args.kwargs.get("exchanges") is None  # desk_common priority (okx first)
+        ex.fetch_ohlcv.assert_called_once_with("ETH/USDT", "1d", limit=50)  # no stale `since`
+        assert df.attrs == {"source": "okx", "synthetic_ohlc": False, "volume_available": True}
+        assert len(df) == 50
+
+    def test_stale_candles_rejected(self):
+        ex = MagicMock()
+        ex.fetch_ohlcv.return_value = _rows(last_ts_ms=1_600_000_000_000)  # year 2020
+        captured = {}
+
+        def fake(fn, exchanges=None, market="spot"):
+            try:
+                fn(ex)
+            except ValueError as e:
+                captured["err"] = str(e)
+            raise RuntimeError("all exchanges failed")
+
+        with patch("crypto_technical_analysis.fetch_with_fallback", side_effect=fake), \
+             patch("crypto_technical_analysis.fetch_coingecko_fallback", return_value=None):
+            assert ta.safe_fetch_ohlcv_data("BTC", 50) is None
+        assert "stale" in captured["err"]
+
+    def test_tool_reports_data_source(self):
+        df = MOCK_DF.copy()
+        df.attrs.update({"source": "kraken", "synthetic_ohlc": False, "volume_available": True})
+        with patch("crypto_technical_analysis.safe_fetch_ohlcv_data", return_value=df):
+            result = call_tool(ta.calculate_rsi, "BTC")
+        assert result["data_source"] == "kraken"
+        assert "data_quality" not in result
+
+
+class TestCoinGeckoFallbackFlagged:
+    def _ohlc_payload(self, n=40):
+        return [[1_740_000_000_000 + i * 14_400_000, 100 + i, 102 + i, 98 + i, 101 + i] for i in range(n)]
+
+    def test_ohlc_fallback_has_no_fabricated_volume(self):
+        with patch("crypto_technical_analysis.fetch_with_fallback", side_effect=RuntimeError("down")), \
+             patch("crypto_technical_analysis.http_get_json", return_value=self._ohlc_payload()) as hg:
+            df = ta.safe_fetch_ohlcv_data("BTC", 100)
+        assert df["volume"].isna().all()
+        assert (df["volume"] != 1_000_000).all()
+        assert df.attrs["volume_available"] is False
+        assert df.attrs["synthetic_ohlc"] is False
+        assert hg.call_args.kwargs["params"]["days"] == 180  # valid CoinGecko bucket >= 100
+
+    def test_market_chart_fallback_flagged_synthetic(self):
+        chart = {"prices": [[1_740_000_000_000 + i * 3_600_000, 100.0 + i] for i in range(48)],
+                 "total_volumes": [[1_740_000_000_000 + i * 3_600_000, 5e9] for i in range(48)]}
+
+        def fake_http(url, params=None, **kw):
+            if url.endswith("/ohlc"):
+                raise ta.HttpError("HTTP 429", 429, url)
+            return chart
+
+        with patch("crypto_technical_analysis.fetch_with_fallback", side_effect=RuntimeError("down")), \
+             patch("crypto_technical_analysis.http_get_json", side_effect=fake_http):
+            df = ta.safe_fetch_ohlcv_data("BTC", 2)
+        assert df.attrs["synthetic_ohlc"] is True
+        assert df["volume"].isna().all()
+        # no fabricated +/-0.1% wicks
+        assert (df["high"] == df[["open", "close"]].max(axis=1)).all()
+
+    def test_volume_tools_warn_on_fallback(self):
+        df = MOCK_DF.copy()
+        df["volume"] = np.nan
+        df.attrs.update({"source": "coingecko_market_chart", "synthetic_ohlc": True, "volume_available": False})
+        with patch("crypto_technical_analysis.safe_fetch_ohlcv_data", return_value=df):
+            vp = call_tool(ta.analyze_volume_profile, "BTC")
+            tr = call_tool(ta.detect_trend_reversals, "BTC")
+            rsi = call_tool(ta.calculate_rsi, "BTC")
+        assert "error" in vp and vp["data_quality"]["level"] == "degraded"
+        assert any("volume" in w.lower() for w in tr["data_quality"]["warnings"])
+        assert "HIGH_VOLUME_CONFIRMATION" not in tr["reversal_signals"]
+        assert rsi["synthetic_ohlc"] is True and rsi["volume"] is None

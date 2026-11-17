@@ -20,7 +20,7 @@ If unclear, ask the user what type of component they want.
 
 ### Step 2: Research
 Delegate to `system-builder` agent:
-"Research what's needed to create: $ARGUMENTS. Use WebSearch to find relevant public APIs (prefer no-API-key-required). Use WebFetch to read API documentation. Read existing components in the project to understand patterns — read at least 2 files from the relevant directory (mcp-servers/, agents/, or skills/). Read mcp-servers/validators.py for reusable validation. Write a research summary to data/create/{name}-research.md with: APIs found, rate limits, data available, recommended approach."
+"Research what's needed to create: $ARGUMENTS. Use WebSearch to find relevant public APIs (prefer no-API-key-required). Use WebFetch to read API documentation. Read existing components in the project to understand patterns — read at least 2 files from the relevant directory (mcp-servers/, agents/, or skills/). Read mcp-servers/validators.py for reusable validation and mcp-servers/desk_common/ (http_get with cache/backoff/proxy, get_exchange with OKX-first fallback, get_key/unavailable for optional keys, tool_serializer) — new servers must use it (template in docs/extending.md). Write a research summary to data/create/{name}-research.md with: APIs found, rate limits, data available, recommended approach."
 
 ### Step 3: Generate
 After research completes, delegate to `system-builder` agent:
@@ -49,7 +49,8 @@ After the component is generated, present:
 3. **Next steps** — tell the user what they need to do:
 
 For **MCP servers**:
-- Add the server configuration to `mcp-servers.plugin.json`
+- Add the server configuration to `mcp-servers.plugin.json` and `.mcp.json`
+- Add `mcp__{name}` to `ALLOWED_TOOLS` in `bin/autopilot.sh`
 - Add the server name to relevant agents' `mcpServers` list in their frontmatter
 - Add the server to the MCP table in `CLAUDE.md`
 - Run `uv run --frozen pytest tests/test_{name}.py -v` to verify the tests pass
@@ -57,6 +58,7 @@ For **MCP servers**:
 
 For **agents**:
 - Add routing rules in `CLAUDE.md` (which queries should route to this agent)
+- Make sure its output section points to `docs/output-format.md` §1
 - Add the agent to the agents table in `CLAUDE.md`
 
 For **skills**:

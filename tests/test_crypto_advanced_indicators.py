@@ -247,3 +247,49 @@ class TestErrorHandling:
             from crypto_advanced_indicators import calculate_mfi
             result = call_tool(calculate_mfi, "BTC", "1h", 100)
         assert result["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# V2 regression tests — no hardcoded Binance; priority fallback for OHLCV
+# ---------------------------------------------------------------------------
+
+import crypto_advanced_indicators as adv  # noqa: E402
+
+
+def _raw_rows(df):
+    return [[int(t.timestamp() * 1000), o, h, l, c, v]
+            for t, o, h, l, c, v in df[["timestamp", "open", "high", "low", "close", "volume"]].itertuples(index=False)]
+
+
+class TestPriorityFallback:
+    def test_no_module_level_binance_instance(self):
+        assert not hasattr(adv, "EXCHANGE")
+
+    def test_fetch_uses_fetch_with_fallback_and_records_venue(self):
+        ex = MagicMock()
+        ex.fetch_ohlcv.return_value = _raw_rows(MOCK_DF)
+
+        def fake_fallback(fn, exchanges=None, market="spot"):
+            assert exchanges is None  # default = desk_common priority list (okx first)
+            return fn(ex), "okx", ["binance: ExchangeNotAvailable: 451"]
+
+        with patch("crypto_advanced_indicators.fetch_with_fallback", side_effect=fake_fallback):
+            df = adv._fetch_ohlcv("ETH", "4h", 50)
+        ex.fetch_ohlcv.assert_called_once_with("ETH/USDT", "4h", limit=50)
+        assert df.attrs["exchange"] == "okx"
+        assert len(df) == len(MOCK_DF)
+
+    def test_tool_reports_exchange_used(self):
+        ex = MagicMock()
+        ex.fetch_ohlcv.return_value = _raw_rows(MOCK_DF)
+        with patch("crypto_advanced_indicators.fetch_with_fallback",
+                   side_effect=lambda fn, exchanges=None, market="spot": (fn(ex), "kraken", [])):
+            result = call_tool(adv.calculate_adx, "BTC", "1h", 100)
+        assert result["success"] is True
+        assert result["exchange_used"] == "kraken"
+
+    def test_all_venues_down_is_error(self):
+        with patch("crypto_advanced_indicators.fetch_with_fallback",
+                   side_effect=RuntimeError("all exchanges failed")):
+            result = call_tool(adv.calculate_vwap, "BTC")
+        assert result["success"] is False

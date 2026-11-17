@@ -1,113 +1,44 @@
 ---
 name: analyze
-description: Run a comprehensive multi-agent crypto analysis with phased execution. Usage: /analyze BTC or /analyze ETH SOL
+description: Full multi-agent crypto analysis with a trading decision and persisted orders. Usage: /analyze BTC · /analyze ETH SOL · /analyze BTC --alts · add --full for per-agent detail
 user-invocable: true
 ---
 
-# Full Crypto Analysis
+# Full Crypto Analysis (V2)
 
-Run a comprehensive analysis of $ARGUMENTS using 5 specialized agents in 3 sequential phases. Each phase writes a report file; the next phase reads those files before starting.
+Analyze $ARGUMENTS in 5 phases. Each phase writes a file; later phases read those files. Final answer to the user = the brief only (`docs/output-format.md` §3, ≤25 lines, Spanish).
 
-**All agents use `subagent_type: general-purpose`** with explicit `model` to ensure MCP tool access. Include "Do NOT use the Edit tool" in every prompt.
+**Delegation rules:** every agent is a Task with `subagent_type: general-purpose` and an explicit `model`. Every prompt starts with "You are the <role> agent. Read agents/<role>.md for your framework." and ends with "Follow docs/output-format.md. Do NOT use the Edit tool."
 
-## Workflow
+## Phase 0: Setup
+- Parse: symbols (first = primary `{SYMBOL}`), flags `--alts`, `--full`.
+- `DIR = data/reports/YYYY-MM-DD-{SYMBOL}/` (UTC date; multi-symbol → `YYYY-MM-DD-{SYM1}-{SYM2}`). Create it.
+- `SCAN = true` if `--alts` or more than one symbol.
 
-### Phase 0: Setup
-1. Create directory: `data/reports/YYYY-MM-DD-{symbol}/` (use today's date)
+## Phase 1: Data gathering (parallel — launch all in ONE response)
+1. **market-monitor** (`haiku`): "Market data for {SYMBOLS}: prices (crypto-exchange), F&G/dominance (crypto-data), aggregated OI, liquidations, OKX positioning (crypto-derivatives), funding (crypto-futures, exchange='okx'), Coinbase premium (crypto-flows). Write {DIR}/market-data.md."
+2. **technical-analyst** (`sonnet`): "Technical analysis for {SYMBOLS}. Start with get_prediction_track_record(agent='technical-analyst', symbol='{SYMBOL}/USDT'). Use classify_regime + volatility_regime (crypto-quant) first; every SL ≥ 1×ATR. Indicators from crypto-technical and crypto-advanced-indicators. Write {DIR}/technical-analysis.md."
+3. **news-sentiment** (`sonnet`): "News and sentiment for {SYMBOLS}. Start with get_prediction_track_record(agent='news-sentiment', ...). crypto-intel first (get_headlines, get_crypto_panic, get_social_pulse, get_token_unlocks), then ≤4 WebSearch for gaps, Polymarket for event odds. Write {DIR}/news-sentiment.md."
+4. **macro-flows** (`sonnet`): "Macro and flows backdrop for {SYMBOLS}: crypto-macro, crypto-flows, crypto-derivatives (options), crypto-onchain, Polymarket. Verdict A FAVOR/NEUTRAL/EN CONTRA for 1-7d and 2-6w. Write {DIR}/macro-flows.md."
+5. *(only if SCAN)* **quant-scanner** (`sonnet`): "Scan alts (universe: {extra symbols or 'top 40 liquid OKX USDT pairs'}): regime, breadth, sector_rotation, relative_strength_scan, behavior_base_rates, correlation_matrix. Max 5 complete setups with ATR-based SL. Write {DIR}/alt-scan.md."
 
-### Phase 1: Data Gathering (3 agents in parallel)
-Spawn ALL 3 agents simultaneously using the Task tool. Do NOT wait for one before spawning the next — launch all 3 in a single response.
+**Verify** with Glob that the files exist. A missing file (timeout) is passed to Phase 2 as a data gap — do not re-run.
 
-1. **market-monitor** — Task with `subagent_type: general-purpose`, `model: haiku`:
-   "You are the market-monitor agent. Read agents/market-monitor.md for your full analysis framework.
-   Gather real-time market data for $ARGUMENTS.
-   Use crypto-exchange MCP (get_exchange_prices, fetch_ohlcv_data, analyze_volume_patterns) for ACCURATE current prices and volume.
-   Use crypto-data MCP (get_fear_greed_index, get_dominance_stats, get_global_market_stats) for market metadata.
-   Use crypto-futures MCP (get_funding_rate, get_open_interest, get_long_short_ratio) for derivatives data.
-   Use WebSearch for whale alerts and breaking news.
-   Write your complete report to data/reports/YYYY-MM-DD-{symbol}/market-data.md.
-   Do NOT use the Edit tool."
+## Phase 2: Risk (after Phase 1 files exist)
+6. **risk-specialist** (`sonnet`): "FIRST read every .md in {DIR} (already written). Then get_prediction_track_record(agent='risk-specialist', ...). Stress-test each setup: volatility_regime, correlation_matrix (crypto-quant); options/liquidations (crypto-derivatives); microstructure; stablecoin flows; get_btc_valuation. Flag any SL < 1×ATR(daily). Verdict OK/AJUSTAR/RECHAZAR per setup. Write {DIR}/risk-assessment.md."
 
-2. **technical-analyst** — Task with `subagent_type: general-purpose`, `model: sonnet`:
-   "You are the technical-analyst agent. Read agents/technical-analyst.md for your full analysis framework.
-   Run full technical analysis for $ARGUMENTS.
-   First call get_prediction_track_record(agent='technical-analyst', symbol='{SYMBOL}/USDT') from crypto-learning-db to check your past accuracy — calibrate your analysis based on where you've been right/wrong.
-   Use crypto-technical MCP (calculate_rsi, calculate_macd, calculate_bollinger_bands, detect_chart_patterns, calculate_moving_averages, get_support_resistance, generate_trading_signals).
-   Use crypto-advanced-indicators MCP (calculate_ichimoku, calculate_vwap, calculate_adx, calculate_obv, detect_divergences).
-   Use crypto-exchange MCP (fetch_ohlcv_data) for price data.
-   Write your complete report to data/reports/YYYY-MM-DD-{symbol}/technical-analysis.md.
-   Do NOT use the Edit tool."
+Verify `risk-assessment.md` exists.
 
-3. **news-sentiment** — Task with `subagent_type: general-purpose`, `model: sonnet`:
-   "You are the news-sentiment agent. Read agents/news-sentiment.md for your full analysis framework.
-   Analyze latest news and social sentiment for $ARGUMENTS.
-   First call get_prediction_track_record(agent='news-sentiment', symbol='{SYMBOL}/USDT') from crypto-learning-db to check your past accuracy.
-   Use WebSearch extensively: search for '{SYMBOL} crypto news today', '{SYMBOL} twitter sentiment', '{SYMBOL} reddit discussion', regulatory news.
-   Use WebFetch to read full articles when headlines are significant.
-   Cover: breaking news, regulatory updates, social media mood, FUD/FOMO detection, contrarian signals.
-   Write your complete report to data/reports/YYYY-MM-DD-{symbol}/news-sentiment.md.
-   Do NOT use the Edit tool."
+## Phase 3: Decision (after Phase 2)
+7. **portfolio-manager** (`opus`): "FIRST read every .md in {DIR}. get_portfolio_state(), list_orders(status='pending'), list_kill_switches(). Verify price with get_exchange_prices. Read regime (classify_regime) and behavior_base_rates for the current condition, plus the macro-flows verdict. Decide EXECUTE/WAIT/REJECT per the two-book rules. EXECUTE → record_trade(). WAIT with entries → place_order() for each (expiry + cancel condition) and add_kill_switch() for each measurable kill switch. Always record_prediction(trade_id=None, source='decision') for the key forecast. Write {DIR}/decision.md (§2). Return the verdict line, the action table and all persisted IDs."
 
-### Phase 1 Verification
-After all 3 Task calls return, verify the report files exist on disk using Glob. If news-sentiment did not produce a file (timeout), proceed without it — note the gap in the Phase 2 prompt.
+## Phase 4: Predictions (if a trade was opened OR orders were placed)
+8. **learning-agent** (`opus`): "Read {DIR}/decision.md (and alt-scan.md if present). Record testable predictions (Mission 2): trades opened → source='trade' with trade_id; pending orders → trade_id=None, source='order', order_id (fills before expiry? TP1 before SL?); alt-scan setups not taken → source='scan'. Skip any already recorded by the PM. Return the prediction IDs."
 
-### Phase 2: Risk Assessment (1 agent, after Phase 1)
-Only spawn AFTER Phase 1 files are confirmed on disk.
+Skip Phase 4 on a REJECT with no orders (the PM's own prediction is enough).
 
-4. **risk-specialist** — Task with `subagent_type: general-purpose`, `model: sonnet`:
-   "You are the risk-specialist agent. Read agents/risk-specialist.md for your full analysis framework.
-   FIRST read these Phase 1 reports — they are ALREADY written on disk:
-   - data/reports/YYYY-MM-DD-{symbol}/market-data.md
-   - data/reports/YYYY-MM-DD-{symbol}/technical-analysis.md
-   - data/reports/YYYY-MM-DD-{symbol}/news-sentiment.md (if it exists)
-   Read them before doing anything else.
-   Call get_prediction_track_record(agent='risk-specialist', symbol='{SYMBOL}/USDT') from crypto-learning-db to check your past accuracy.
-   Use crypto-technical MCP (calculate_volatility, get_correlation_analysis).
-   Use crypto-market-microstructure MCP (analyze_orderbook_depth, detect_orderbook_imbalance, calculate_spread_metrics, analyze_order_flow, detect_spoofing_patterns, calculate_market_impact).
-   Use crypto-exchange MCP (get_cross_exchange_liquidity).
-   Use crypto-data MCP (get_fear_greed_index, get_crypto_prices).
-   Write your complete report to data/reports/YYYY-MM-DD-{symbol}/risk-assessment.md.
-   Do NOT use the Edit tool."
-
-### Phase 2 Verification
-After the Task call returns, verify `risk-assessment.md` exists on disk.
-
-### Phase 3: Trading Decision (1 agent, after Phase 2)
-Only spawn AFTER risk-assessment.md is confirmed on disk.
-
-5. **portfolio-manager** — Task with `subagent_type: general-purpose`, `model: opus`:
-   "You are the portfolio-manager agent. Read agents/portfolio-manager.md for your full decision framework.
-   FIRST read ALL files in data/reports/YYYY-MM-DD-{symbol}/ — these are ALREADY written by previous agents. Read market-data.md, technical-analysis.md, news-sentiment.md (if exists), and risk-assessment.md.
-   Call get_prediction_track_record(symbol='{SYMBOL}/USDT') from crypto-learning-db to check how this type of setup has performed historically — read the recent evaluations for context.
-   Call get_portfolio_state() from crypto-learning-db to check balances and open positions.
-   Verify current price with get_exchange_prices(symbol='{SYMBOL}/USDT') from crypto-exchange MCP.
-   Synthesize all agent findings. Make final EXECUTE/WAIT/REJECT decision with position sizing, entry/SL/TP, and R/R ratio.
-   If EXECUTE, call record_trade() from crypto-learning-db with all required fields including the learning JSON.
-   Write decision to data/reports/YYYY-MM-DD-{symbol}/decision.md.
-   Do NOT use the Edit tool."
-
-### Phase 4: Record Predictions (if EXECUTE)
-If the portfolio-manager's decision was EXECUTE and a trade was opened:
-
-Delegate using Task with `subagent_type: general-purpose`, `model: opus`:
-"You are the learning-agent. Read agents/learning-agent.md for your analysis framework.
-Record predictions for the latest trade just opened.
-Call query_trades(status='open', limit=1) from crypto-learning-db to get the trade.
-Read its key_assumptions and learning fields.
-Extract each testable prediction (price direction, support/resistance holds, funding expectations, risk scenarios).
-Call record_prediction() from crypto-learning-db for each prediction.
-Do NOT use the Edit tool."
-
-### Phase 5: Synthesize & Present
-1. Read all output files from `data/reports/YYYY-MM-DD-{symbol}/`
-2. Create consolidated report at `data/reports/YYYY-MM-DD-{symbol}/full-report.md`
-3. Present the portfolio-manager's EXECUTE/WAIT/REJECT decision prominently
-4. If predictions were recorded, mention how many predictions are being tracked
-
-### Output
-Present a consolidated report with:
-- Market data summary (prices, volume, funding, fear/greed)
-- Technical signals and key levels (entry/SL/TP)
-- News & sentiment overview
-- Risk assessment score
-- **FINAL DECISION: EXECUTE/WAIT/REJECT** with full trade parameters
+## Phase 5: Brief (coordinator — no agent)
+1. Read `{DIR}/decision.md` and the JSON blocks of the other reports (not the full prose).
+2. Write `{DIR}/brief.md` per `docs/output-format.md` §3: veredicto · one action table · 3-5 "por qué" bullets each with a number (regime/base rate, macro-flows, flows/derivatives, risk) · triggers and kill-switches · datos faltantes · "Paper trading — no es asesoramiento financiero." Do NOT write `full-report.md`.
+3. Answer the user with the brief only (≤25 lines, Spanish), plus one line with the persisted order/kill-switch/prediction IDs and the report folder path.
+4. `--full`: append ≤3 lines per agent summary and the file paths.

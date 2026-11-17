@@ -1,0 +1,516 @@
+{
+ "version": "2026-11-17",
+ "description": "Static macro calendar for crypto-macro.get_macro_calendar. Dates in America/New_York local time (time_et). 'confirmed': false = estimated or not verified against the official source \u2014 re-check before trading around it. Deribit option expiries are computed in code (last Friday 08:00 UTC), not stored here.",
+ "sources": [
+  "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+  "https://www.bls.gov/schedule/2026/",
+  "https://www.bls.gov/schedule/2027/home.htm"
+ ],
+ "maintenance": "Update yearly: add next year's FOMC schedule (published ~September) and BLS schedule (published ~October); flip confirmed=true once checked.",
+ "events": [
+  {
+   "date": "2026-01-28",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-03-18",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-04-29",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-06-17",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-07-29",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-09-16",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-10-28",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-11-10",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Oct 2026)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2026-12-04",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Nov 2026)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2026-12-09",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2026-12-10",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Nov 2026)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2026-12-15",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Nov 2026)",
+   "impact": "medium",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2027-01-08",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Dec 2026)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2027-01-13",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Dec 2026)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2027-01-14",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Dec 2026) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-01-27",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": false,
+   "source": "third-party calendars + Polymarket 'Fed Decision in January' event end date; Fed page snippet not verified"
+  },
+  {
+   "date": "2027-02-05",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Jan 2027)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2027-02-11",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Jan 2027)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2027-02-12",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Jan 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-03-05",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Feb 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-03-10",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Feb 2027)",
+   "impact": "high",
+   "confirmed": true,
+   "source": "bls.gov release schedule"
+  },
+  {
+   "date": "2027-03-11",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Feb 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-03-17",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-04-02",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Mar 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-04-12",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Mar 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-04-13",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Mar 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-04-28",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-05-07",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Apr 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-05-12",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Apr 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-05-13",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Apr 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-06-04",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (May 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-06-09",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-06-14",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (May 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-06-15",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (May 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-07-02",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Jun 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-07-12",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Jun 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-07-13",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Jun 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-07-28",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-08-06",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Jul 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-08-12",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Jul 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-08-13",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Jul 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-09-03",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Aug 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-09-13",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Aug 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-09-14",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Aug 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-09-15",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-10-01",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Sep 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-10-12",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Sep 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-10-13",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Sep 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-10-27",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-11-05",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Oct 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-11-12",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Oct 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-11-15",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Oct 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-12-03",
+   "time_et": "08:30",
+   "type": "NFP",
+   "title": "Employment Situation / NFP (Nov 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: first Friday rule; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-12-08",
+   "time_et": "14:00",
+   "type": "FOMC",
+   "title": "FOMC rate decision + SEP/dot plot + presser",
+   "impact": "high",
+   "confirmed": true,
+   "source": "federalreserve.gov FOMC calendar (2026 schedule; 2027 tentative schedule press release 2025-09-05)"
+  },
+  {
+   "date": "2027-12-13",
+   "time_et": "08:30",
+   "type": "CPI",
+   "title": "CPI (Nov 2027) \u2014 estimated",
+   "impact": "high",
+   "confirmed": false,
+   "source": "estimate: ~12th of month; check bls.gov/schedule"
+  },
+  {
+   "date": "2027-12-14",
+   "time_et": "08:30",
+   "type": "PPI",
+   "title": "PPI (Nov 2027) \u2014 estimated",
+   "impact": "medium",
+   "confirmed": false,
+   "source": "estimate: ~1 business day after CPI; check bls.gov/schedule"
+  }
+ ]
+}

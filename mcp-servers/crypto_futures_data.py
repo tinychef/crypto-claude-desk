@@ -17,7 +17,10 @@ Provides perpetual futures market data using CCXT (no API keys required).
 10. detect_funding_arbitrage - Detect funding rate arbitrage opportunities
 
 Supported Exchanges (no API keys):
-- Binance, Bybit, OKX, Bitget, MEXC
+- OKX (default), Bitget, MEXC, Binance, Bybit
+  (Binance/Bybit geo-block cloud IPs with 451/403; ccxt instances come from
+  desk_common.get_exchange with proxy support, venues ordered by exchange_priority("swap"))
+- Long/short + taker ratios: OKX Rubik public stats (default) or Binance futures data.
 """
 
 import ccxt
@@ -28,21 +31,49 @@ import functools
 import statistics
 import logging
 
+from collections.abc import Mapping
+
+from desk_common import tool_serializer, get_exchange, exchange_priority, fetch_with_fallback, http_get_json, HttpError
+from desk_common.exchanges import mark_blocked, _is_geo_block, _blocked as _BLOCKED_VENUES
 from validators import validate_symbol, validate_exchange, validate_positive_int
 
 logger = logging.getLogger(__name__)
 
-# Initialize MCP server
-mcp = FastMCP("crypto-futures-data")
+# Initialize MCP server (numpy/NaN-safe serializer)
+mcp = FastMCP("crypto-futures-data", tool_serializer=tool_serializer)
 
-# Reliable exchanges with public futures data
-RELIABLE_FUTURES_EXCHANGES = {
-    'binance': ccxt.binance(),
-    'bybit': ccxt.bybit(),
-    'okx': ccxt.okx(),
-    'bitget': ccxt.bitget(),
-    'mexc': ccxt.mexc()
-}
+FUTURES_VENUES = ["okx", "bitget", "mexc", "binance", "bybit"]
+
+
+class _FuturesRegistry(Mapping):
+    """Lazy name -> ccxt swap instance mapping (desk_common.get_exchange, proxy-aware)."""
+
+    def __init__(self, names: List[str]):
+        self._names = list(names)
+
+    def __contains__(self, name) -> bool:
+        return isinstance(name, str) and name in self._names
+
+    def __getitem__(self, name: str):
+        if name not in self._names:
+            raise KeyError(name)
+        return get_exchange(name, "swap")
+
+    def __iter__(self):
+        prio = [n for n in exchange_priority("swap") if n in self._names]
+        return iter(prio + [n for n in self._names if n not in prio])
+
+    def __len__(self) -> int:
+        return len(self._names)
+
+
+# Reliable exchanges with public futures data (lazy; tests may patch with a dict)
+RELIABLE_FUTURES_EXCHANGES = _FuturesRegistry(FUTURES_VENUES)
+
+# Public positioning-stat sources (long/short + taker ratios)
+OKX_RUBIK = "https://www.okx.com/api/v5/rubik/stat"
+BINANCE_FAPI_DATA = "https://fapi.binance.com/futures/data"
+RATIO_SOURCES = ("okx", "binance")
 
 # Funding rate thresholds (annualized %)
 FUNDING_NEUTRAL_THRESHOLD = 5        # |annual rate| < 5% = neutral
@@ -86,6 +117,34 @@ def _get_exchange(exchange_name: str):
     return RELIABLE_FUTURES_EXCHANGES[exchange_name]
 
 
+def _should_fallback(err: Exception) -> bool:
+    return _is_geo_block(err) or isinstance(err, (ccxt.NetworkError, ccxt.BadSymbol))
+
+
+def _venue_call(exchange: str, fn):
+    """Run ``fn(ex)`` on the requested venue; if it is geo-blocked / unreachable / lacks the
+    market, fall back through the swap priority list. Returns (result, exchange_used)."""
+    try:
+        return fn(_get_exchange(exchange)), exchange
+    except Exception as e:
+        if not _should_fallback(e):
+            raise
+        if _is_geo_block(e):
+            mark_blocked(exchange)
+        logger.warning("futures: %s failed (%s), falling back", exchange, e.__class__.__name__)
+    others = [n for n in RELIABLE_FUTURES_EXCHANGES.keys() if n != exchange and n not in _BLOCKED_VENUES]
+    result, used, _errs = fetch_with_fallback(fn, exchanges=others, market="swap")
+    return result, used
+
+
+def _num(x) -> Optional[float]:
+    try:
+        v = float(x)
+        return v if v == v else None  # drop NaN
+    except (TypeError, ValueError):
+        return None
+
+
 def _format_symbol(symbol: str) -> str:
     """
     Format symbol for perpetual futures.
@@ -101,7 +160,7 @@ def _format_symbol(symbol: str) -> str:
 
 def _get_funding_rate(
     symbol: str = "BTC",
-    exchange: str = "binance"
+    exchange: str = "okx"
 ) -> Dict[str, Any]:
     """
     Get current perpetual funding rate.
@@ -117,10 +176,9 @@ def _get_funding_rate(
         symbol = validate_symbol(symbol)
         exchange = validate_exchange(exchange, supported=set(RELIABLE_FUTURES_EXCHANGES.keys()))
 
-        ex = _get_exchange(exchange)
         formatted_symbol = _format_symbol(symbol)
 
-        funding_rate = ex.fetch_funding_rate(formatted_symbol)
+        funding_rate, exchange_used = _venue_call(exchange, lambda ex: ex.fetch_funding_rate(formatted_symbol))
 
         # Annualized funding rate
         rate = funding_rate['fundingRate']
@@ -143,6 +201,7 @@ def _get_funding_rate(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "funding_rate": rate,
             "funding_rate_percentage": rate * 100,
@@ -167,7 +226,7 @@ def _get_funding_rate(
 
 def _get_funding_rate_history(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     hours: int = 24
 ) -> Dict[str, Any]:
     """
@@ -186,11 +245,11 @@ def _get_funding_rate_history(
         exchange = validate_exchange(exchange, supported=set(RELIABLE_FUTURES_EXCHANGES.keys()))
         hours = validate_positive_int(hours, "hours", max_value=720)
 
-        ex = _get_exchange(exchange)
         formatted_symbol = _format_symbol(symbol)
 
         since = int((datetime.now() - timedelta(hours=hours)).timestamp() * 1000)
-        history = ex.fetch_funding_rate_history(formatted_symbol, since=since)
+        history, exchange_used = _venue_call(
+            exchange, lambda ex: ex.fetch_funding_rate_history(formatted_symbol, since=since))
 
         if not history:
             return {
@@ -218,6 +277,7 @@ def _get_funding_rate_history(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "period_hours": hours,
             "total_fundings": len(rates),
@@ -244,7 +304,7 @@ def _get_funding_rate_history(
 
 def _get_open_interest(
     symbol: str = "BTC",
-    exchange: str = "binance"
+    exchange: str = "okx"
 ) -> Dict[str, Any]:
     """
     Get current Open Interest.
@@ -263,32 +323,48 @@ def _get_open_interest(
         symbol = validate_symbol(symbol)
         exchange = validate_exchange(exchange, supported=set(RELIABLE_FUTURES_EXCHANGES.keys()))
 
-        ex = _get_exchange(exchange)
         formatted_symbol = _format_symbol(symbol)
 
-        oi = ex.fetch_open_interest(formatted_symbol)
+        def _fetch(ex):
+            return ex.fetch_open_interest(formatted_symbol), ex.fetch_ticker(formatted_symbol), ex
 
-        ticker = ex.fetch_ticker(formatted_symbol)
-        current_price = ticker['last']
+        (oi, ticker, ex), exchange_used = _venue_call(exchange, _fetch)
+        current_price = _num(ticker.get('last'))
 
-        oi_value = oi['openInterestAmount']
-        oi_contracts = oi['openInterestValue']
-
-        oi_btc_equivalent = oi_value / current_price if current_price else 0
+        # ccxt unified fields: openInterestAmount = contracts (or base units on venues
+        # without contract sizes), openInterestValue = USD notional. (V1 had them swapped.)
+        oi_contracts = _num(oi.get('openInterestAmount'))
+        oi_usd = _num(oi.get('openInterestValue'))
+        oi_base = _num(oi.get('baseVolume'))  # OKX reports base-coin OI here (oiCcy)
+        if oi_base is None and oi_contracts is not None:
+            contract_size = None
+            try:
+                contract_size = _num((ex.markets or {}).get(formatted_symbol, {}).get('contractSize'))
+            except Exception:
+                contract_size = None
+            if contract_size is not None:
+                oi_base = oi_contracts * contract_size
+            elif oi_usd is not None and current_price:
+                oi_base = oi_usd / current_price
+        if oi_usd is None and oi_base is not None and current_price:
+            oi_usd = oi_base * current_price
 
         interpretation = []
-        if oi_btc_equivalent > 100000:
-            interpretation.append("Very high OI - High liquidity and participation")
-        elif oi_btc_equivalent < 50000:
-            interpretation.append("Low OI - Low futures participation")
+        if oi_usd is not None:
+            if oi_usd > 5_000_000_000:
+                interpretation.append("Very high OI - High liquidity and participation")
+            elif oi_usd < 100_000_000:
+                interpretation.append("Low OI - Low futures participation")
 
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
-            "open_interest_usd": oi_value,
+            "open_interest_usd": round(oi_usd, 2) if oi_usd is not None else None,
             "open_interest_contracts": oi_contracts,
-            "open_interest_btc_equivalent": round(oi_btc_equivalent, 2),
+            "open_interest_base": round(oi_base, 4) if oi_base is not None else None,
+            "open_interest_btc_equivalent": round(oi_base, 2) if oi_base is not None else None,
             "current_price": current_price,
             "timestamp": oi['timestamp'],
             "interpretation": " | ".join(interpretation) if interpretation else "Normal OI",
@@ -306,93 +382,128 @@ def _get_open_interest(
         }
 
 
+_OKX_PERIODS = {"5m": "5m", "15m": "15m", "30m": "30m", "1h": "1H", "2h": "2H", "4h": "4H",
+                "6h": "6H", "12h": "12H", "1d": "1D"}
+_OKX_CCY_PERIODS = ("5m", "1H", "1D")  # ccy-level Rubik endpoints only accept these
+
+
+def _okx_period(period: str, ccy_level: bool = False) -> str:
+    p = _OKX_PERIODS.get((period or "5m").strip().lower(), "5m")
+    if ccy_level and p not in _OKX_CCY_PERIODS:
+        p = "1D" if p.endswith("D") else ("1H" if p.endswith("H") else "5m")
+    return p
+
+
+def _okx_rubik(path: str, params: Dict[str, Any]) -> List[List[str]]:
+    """GET an OKX Rubik stat endpoint and return its ``data`` rows (newest first)."""
+    payload = http_get_json(f"{OKX_RUBIK}/{path}", params=params, ttl=60)
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        msg = payload.get("msg") if isinstance(payload, dict) else "bad payload"
+        raise HttpError(f"OKX Rubik {path} error: {msg}", None, path)
+    return payload.get("data") or []
+
+
+def _binance_futures_data(path: str, base: str, period: str) -> Dict[str, Any]:
+    rows = http_get_json(f"{BINANCE_FAPI_DATA}/{path}",
+                         params={"symbol": f"{base}USDT", "period": period, "limit": 1}, ttl=60)
+    return rows[0] if rows else {}
+
+
+def _ls_sentiment(ratio: float):
+    if ratio > LS_EXTREMELY_BULLISH:
+        return "EXTREMELY_BULLISH", "Top traders very long - Possible reversal"
+    if ratio > LS_BULLISH:
+        return "BULLISH", "Top traders moderately long"
+    if ratio < LS_EXTREMELY_BEARISH:
+        return "EXTREMELY_BEARISH", "Top traders very short - Possible reversal"
+    if ratio < LS_BEARISH:
+        return "BEARISH", "Top traders moderately short"
+    return "NEUTRAL", "Top traders balanced"
+
+
 def _get_long_short_ratio(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     period: str = "5m"
 ) -> Dict[str, Any]:
     """
     Get Long/Short ratio of traders (top traders and all accounts).
 
-    NOTE: Only Binance provides this data publicly.
+    Sources (public, no key): OKX Rubik stats (default; reachable from cloud) or Binance
+    futures data (geo-blocked from US cloud IPs). ``top_trader_long_short_ratio`` = top
+    traders' long/short POSITION ratio; ``global_long_short_ratio`` = all accounts long/short.
+    >2 crowded long (contrarian bearish), <0.5 crowded short (squeeze fuel).
 
     Args:
         symbol: Symbol (BTC, ETH, etc.)
-        exchange: Exchange (only binance supported)
+        exchange: Data source: "okx" (default) or "binance"
         period: Period (5m, 15m, 30m, 1h, 4h, 1d)
 
     Returns:
         Long/Short ratios for top traders and all accounts
     """
-    if exchange != "binance":
+    exchange = (exchange or "okx").strip().lower()
+    if exchange not in RATIO_SOURCES:
         return {
             "success": False,
-            "error": "Long/Short ratio only available on Binance",
+            "error": f"Long/Short ratio available on {', '.join(RATIO_SOURCES)} (got '{exchange}')",
             "error_type": "UnsupportedExchange",
             "exchange": exchange
         }
 
     try:
         symbol = validate_symbol(symbol)
-        import requests
+        base = symbol.replace("/", "").replace(":USDT", "")
 
-        base_symbol = symbol.replace("/", "").replace(":USDT", "")
-
-        # Top Trader Long/Short Ratio (Positions)
-        url_top = "https://fapi.binance.com/futures/data/topLongShortPositionRatio"
-        params_top = {
-            "symbol": f"{base_symbol}USDT",
-            "period": period,
-            "limit": 1
-        }
-
-        # Global Long/Short Ratio (Accounts)
-        url_global = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
-        params_global = {
-            "symbol": f"{base_symbol}USDT",
-            "period": period,
-            "limit": 1
-        }
-
-        resp_top = requests.get(url_top, params=params_top, timeout=10)
-        resp_global = requests.get(url_global, params=params_global, timeout=10)
-
-        if resp_top.status_code != 200 or resp_global.status_code != 200:
-            return {
-                "success": False,
-                "error": "Error fetching Long/Short ratio from Binance",
-                "error_type": "APIError",
-                "status_top": resp_top.status_code,
-                "status_global": resp_global.status_code
+        if exchange == "okx":
+            ccy_period = _okx_period(period, ccy_level=True)
+            global_rows = _okx_rubik("contracts/long-short-account-ratio", {"ccy": base, "period": ccy_period})
+            if not global_rows:
+                raise HttpError(f"OKX returned no long/short data for {base}", None, "long-short-account-ratio")
+            global_ratio = float(global_rows[0][1])
+            top_ratio, top_row, top_note = None, None, None
+            try:
+                top_rows = _okx_rubik("contracts/long-short-position-ratio-contract-top-trader",
+                                      {"instId": f"{base}-USDT-SWAP", "period": _okx_period(period)})
+                if top_rows:
+                    top_row = top_rows[0]
+                    top_ratio = float(top_row[1])
+            except Exception as e:  # top-trader stats are a bonus; keep the account ratio
+                top_note = f"top-trader ratio unavailable: {str(e)[:120]}"
+            if top_ratio is None:
+                top_ratio = global_ratio
+                top_note = top_note or "top-trader ratio unavailable; using all-accounts ratio"
+            sentiment_top, interpretation_top = _ls_sentiment(top_ratio)
+            result = {
+                "success": True,
+                "exchange": "okx",
+                "source": "okx_rubik",
+                "symbol": f"{base}-USDT-SWAP",
+                "period": ccy_period,
+                "as_of": datetime.fromtimestamp(int(global_rows[0][0]) / 1000).isoformat(),
+                "top_trader_long_short_ratio": round(top_ratio, 4),
+                "global_long_short_ratio": round(global_ratio, 4),
+                "top_trader_sentiment": sentiment_top,
+                "interpretation": interpretation_top,
+                "divergence": abs(top_ratio - global_ratio) > 0.3,
+                "raw_data": {"top_traders": top_row, "global": global_rows[0]},
             }
+            if top_note:
+                result["note"] = top_note
+            return result
 
-        data_top = resp_top.json()[0] if resp_top.json() else {}
-        data_global = resp_global.json()[0] if resp_global.json() else {}
-
+        # Binance (may be geo-blocked: HTTP 451 -> success False)
+        data_top = _binance_futures_data("topLongShortPositionRatio", base, period)
+        data_global = _binance_futures_data("globalLongShortAccountRatio", base, period)
         top_ratio = float(data_top.get('longShortRatio', 0))
         global_ratio = float(data_global.get('longShortRatio', 0))
-
-        # Analysis
-        if top_ratio > LS_EXTREMELY_BULLISH:
-            sentiment_top = "EXTREMELY_BULLISH"
-            interpretation_top = "Top traders very long - Possible reversal"
-        elif top_ratio > LS_BULLISH:
-            sentiment_top = "BULLISH"
-            interpretation_top = "Top traders moderately long"
-        elif top_ratio < LS_EXTREMELY_BEARISH:
-            sentiment_top = "EXTREMELY_BEARISH"
-            interpretation_top = "Top traders very short - Possible reversal"
-        elif top_ratio < LS_BEARISH:
-            sentiment_top = "BEARISH"
-            interpretation_top = "Top traders moderately short"
-        else:
-            sentiment_top = "NEUTRAL"
-            interpretation_top = "Top traders balanced"
+        sentiment_top, interpretation_top = _ls_sentiment(top_ratio)
 
         return {
             "success": True,
             "exchange": "binance",
-            "symbol": f"{base_symbol}USDT",
+            "source": "binance_futures_data",
+            "symbol": f"{base}USDT",
             "period": period,
             "top_trader_long_short_ratio": top_ratio,
             "global_long_short_ratio": global_ratio,
@@ -406,7 +517,7 @@ def _get_long_short_ratio(
         }
 
     except Exception as e:
-        logger.exception("get_long_short_ratio failed")
+        logger.warning("get_long_short_ratio failed: %s", e)
         return {
             "success": False,
             "error": str(e),
@@ -416,9 +527,21 @@ def _get_long_short_ratio(
         }
 
 
+def _taker_pressure(ratio: float):
+    if ratio > TAKER_STRONG_BUY:
+        return "STRONG_BUY_PRESSURE", "Strong buy pressure - Takers buying aggressively"
+    if ratio > TAKER_MODERATE_BUY:
+        return "MODERATE_BUY_PRESSURE", "Moderate buy pressure"
+    if ratio < TAKER_STRONG_SELL:
+        return "STRONG_SELL_PRESSURE", "Strong sell pressure - Takers selling aggressively"
+    if ratio < TAKER_MODERATE_SELL:
+        return "MODERATE_SELL_PRESSURE", "Moderate sell pressure"
+    return "BALANCED", "Balanced pressure between buyers and sellers"
+
+
 def _get_taker_buy_sell_ratio(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     period: str = "5m"
 ) -> Dict[str, Any]:
     """
@@ -427,76 +550,59 @@ def _get_taker_buy_sell_ratio(
     Taker Buy > Taker Sell = Buy pressure
     Taker Sell > Taker Buy = Sell pressure
 
-    NOTE: Only Binance provides this data.
+    Sources (public, no key): OKX Rubik contracts taker volume (default; all OKX
+    contracts for the coin) or Binance futures data (geo-blocked from US cloud IPs).
 
     Args:
         symbol: Symbol (BTC, ETH, etc.)
-        exchange: Exchange (only binance)
+        exchange: Data source: "okx" (default) or "binance"
         period: Period (5m, 15m, 30m, 1h, 4h, 1d)
 
     Returns:
         Taker buy/sell ratio with pressure analysis
     """
-    if exchange != "binance":
+    exchange = (exchange or "okx").strip().lower()
+    if exchange not in RATIO_SOURCES:
         return {
             "success": False,
-            "error": "Taker buy/sell ratio only available on Binance",
+            "error": f"Taker buy/sell ratio available on {', '.join(RATIO_SOURCES)} (got '{exchange}')",
             "error_type": "UnsupportedExchange",
             "exchange": exchange
         }
 
     try:
         symbol = validate_symbol(symbol)
-        import requests
+        base = symbol.replace("/", "").replace(":USDT", "")
 
-        base_symbol = symbol.replace("/", "").replace(":USDT", "")
-
-        url = "https://fapi.binance.com/futures/data/takerlongshortRatio"
-        params = {
-            "symbol": f"{base_symbol}USDT",
-            "period": period,
-            "limit": 1
-        }
-
-        resp = requests.get(url, params=params, timeout=10)
-
-        if resp.status_code != 200:
-            return {
-                "success": False,
-                "error": f"Error fetching taker ratio: {resp.status_code}",
-                "error_type": "APIError",
-                "exchange": exchange
-            }
-
-        data = resp.json()[0] if resp.json() else {}
-
-        buy_sell_ratio = float(data.get('buySellRatio', 0))
-        buy_vol = float(data.get('buyVol', 0))
-        sell_vol = float(data.get('sellVol', 0))
-
-        # Pressure analysis
-        if buy_sell_ratio > TAKER_STRONG_BUY:
-            pressure = "STRONG_BUY_PRESSURE"
-            interpretation = "Strong buy pressure - Takers buying aggressively"
-        elif buy_sell_ratio > TAKER_MODERATE_BUY:
-            pressure = "MODERATE_BUY_PRESSURE"
-            interpretation = "Moderate buy pressure"
-        elif buy_sell_ratio < TAKER_STRONG_SELL:
-            pressure = "STRONG_SELL_PRESSURE"
-            interpretation = "Strong sell pressure - Takers selling aggressively"
-        elif buy_sell_ratio < TAKER_MODERATE_SELL:
-            pressure = "MODERATE_SELL_PRESSURE"
-            interpretation = "Moderate sell pressure"
+        if exchange == "okx":
+            okx_period = _okx_period(period, ccy_level=True)
+            rows = _okx_rubik("taker-volume", {"ccy": base, "instType": "CONTRACTS", "period": okx_period})
+            if not rows:
+                raise HttpError(f"OKX returned no taker volume for {base}", None, "taker-volume")
+            # Row layout per OKX docs: [ts, sellVol, buyVol]
+            ts, sell_vol, buy_vol = rows[0][0], float(rows[0][1]), float(rows[0][2])
+            data = {"ts": ts, "sellVol": rows[0][1], "buyVol": rows[0][2]}
+            source, sym = "okx_rubik", f"{base} (OKX contracts)"
         else:
-            pressure = "BALANCED"
-            interpretation = "Balanced pressure between buyers and sellers"
+            data = _binance_futures_data("takerlongshortRatio", base, period)
+            buy_vol = float(data.get('buyVol', 0))
+            sell_vol = float(data.get('sellVol', 0))
+            source, sym, okx_period = "binance_futures_data", f"{base}USDT", period
+
+        if exchange == "okx":
+            buy_sell_ratio = buy_vol / sell_vol if sell_vol else 0.0
+        else:
+            buy_sell_ratio = float(data.get('buySellRatio', 0))
+
+        pressure, interpretation = _taker_pressure(buy_sell_ratio)
 
         return {
             "success": True,
-            "exchange": "binance",
-            "symbol": f"{base_symbol}USDT",
-            "period": period,
-            "buy_sell_ratio": buy_sell_ratio,
+            "exchange": exchange,
+            "source": source,
+            "symbol": sym,
+            "period": okx_period,
+            "buy_sell_ratio": round(buy_sell_ratio, 4),
             "taker_buy_volume": buy_vol,
             "taker_sell_volume": sell_vol,
             "market_pressure": pressure,
@@ -505,7 +611,7 @@ def _get_taker_buy_sell_ratio(
         }
 
     except Exception as e:
-        logger.exception("get_taker_buy_sell_ratio failed")
+        logger.warning("get_taker_buy_sell_ratio failed: %s", e)
         return {
             "success": False,
             "error": str(e),
@@ -517,7 +623,7 @@ def _get_taker_buy_sell_ratio(
 
 def _calculate_liquidation_levels(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     current_price: Optional[float] = None
 ) -> Dict[str, Any]:
     """
@@ -535,11 +641,11 @@ def _calculate_liquidation_levels(
         symbol = validate_symbol(symbol)
         exchange = validate_exchange(exchange, supported=set(RELIABLE_FUTURES_EXCHANGES.keys()))
 
-        ex = _get_exchange(exchange)
         formatted_symbol = _format_symbol(symbol)
 
+        exchange_used = exchange
         if current_price is None:
-            ticker = ex.fetch_ticker(formatted_symbol)
+            ticker, exchange_used = _venue_call(exchange, lambda ex: ex.fetch_ticker(formatted_symbol))
             current_price = ticker['last']
 
         # Common leverages
@@ -574,6 +680,7 @@ def _calculate_liquidation_levels(
         return {
             "success": True,
             "exchange": exchange,
+            "exchange_used": exchange_used,
             "symbol": formatted_symbol,
             "current_price": current_price,
             "liquidation_levels": liquidation_levels,
@@ -595,7 +702,7 @@ def _calculate_liquidation_levels(
 @mcp.tool()
 def get_perpetual_stats(
     symbol: str = "BTC",
-    exchange: str = "binance"
+    exchange: str = "okx"
 ) -> Dict[str, Any]:
     """
     Get complete perpetual statistics (funding rate, OI, ratios, liquidations).
@@ -616,13 +723,9 @@ def get_perpetual_stats(
         funding = _get_funding_rate(symbol, exchange)
         oi = _get_open_interest(symbol, exchange)
 
-        ls_ratio = None
-        if exchange == "binance":
-            ls_ratio = _get_long_short_ratio(symbol, exchange)
-
-        taker_ratio = None
-        if exchange == "binance":
-            taker_ratio = _get_taker_buy_sell_ratio(symbol, exchange)
+        ratio_source = exchange if exchange in RATIO_SOURCES else "okx"
+        ls_ratio = _get_long_short_ratio(symbol, ratio_source)
+        taker_ratio = _get_taker_buy_sell_ratio(symbol, ratio_source)
 
         current_price = oi.get('current_price') if oi.get('success') else None
         liq_levels = _calculate_liquidation_levels(symbol, exchange, current_price)
@@ -715,7 +818,8 @@ def _compare_funding_rates(
         Funding rate comparison with arbitrage detection
     """
     if exchanges is None:
-        exchanges = list(RELIABLE_FUTURES_EXCHANGES.keys())
+        exchanges = [n for n in RELIABLE_FUTURES_EXCHANGES.keys() if n not in _BLOCKED_VENUES] \
+            or list(RELIABLE_FUTURES_EXCHANGES.keys())
 
     try:
         symbol = validate_symbol(symbol)
@@ -726,7 +830,7 @@ def _compare_funding_rates(
         for exchange in exchanges:
             try:
                 funding = _get_funding_rate(symbol, exchange)
-                if funding.get('success'):
+                if funding.get('success') and funding.get('exchange_used', exchange) == exchange:
                     results[exchange] = funding
                     rates.append({
                         'exchange': exchange,
@@ -780,7 +884,7 @@ def _compare_funding_rates(
 @mcp.tool()
 def analyze_funding_trend(
     symbol: str = "BTC",
-    exchange: str = "binance",
+    exchange: str = "okx",
     hours: int = 48
 ) -> Dict[str, Any]:
     """
@@ -969,28 +1073,28 @@ def detect_funding_arbitrage(
 
 @mcp.tool(name="get_funding_rate")
 @functools.wraps(_get_funding_rate)
-def get_funding_rate(symbol: str = "BTC", exchange: str = "binance") -> Dict[str, Any]:
+def get_funding_rate(symbol: str = "BTC", exchange: str = "okx") -> Dict[str, Any]:
     return _get_funding_rate(symbol, exchange)
 
 
 @mcp.tool(name="get_funding_rate_history")
 @functools.wraps(_get_funding_rate_history)
 def get_funding_rate_history(
-    symbol: str = "BTC", exchange: str = "binance", hours: int = 24
+    symbol: str = "BTC", exchange: str = "okx", hours: int = 24
 ) -> Dict[str, Any]:
     return _get_funding_rate_history(symbol, exchange, hours)
 
 
 @mcp.tool(name="get_open_interest")
 @functools.wraps(_get_open_interest)
-def get_open_interest(symbol: str = "BTC", exchange: str = "binance") -> Dict[str, Any]:
+def get_open_interest(symbol: str = "BTC", exchange: str = "okx") -> Dict[str, Any]:
     return _get_open_interest(symbol, exchange)
 
 
 @mcp.tool(name="get_long_short_ratio")
 @functools.wraps(_get_long_short_ratio)
 def get_long_short_ratio(
-    symbol: str = "BTC", exchange: str = "binance", period: str = "5m"
+    symbol: str = "BTC", exchange: str = "okx", period: str = "5m"
 ) -> Dict[str, Any]:
     return _get_long_short_ratio(symbol, exchange, period)
 
@@ -998,7 +1102,7 @@ def get_long_short_ratio(
 @mcp.tool(name="get_taker_buy_sell_ratio")
 @functools.wraps(_get_taker_buy_sell_ratio)
 def get_taker_buy_sell_ratio(
-    symbol: str = "BTC", exchange: str = "binance", period: str = "5m"
+    symbol: str = "BTC", exchange: str = "okx", period: str = "5m"
 ) -> Dict[str, Any]:
     return _get_taker_buy_sell_ratio(symbol, exchange, period)
 
@@ -1006,7 +1110,7 @@ def get_taker_buy_sell_ratio(
 @mcp.tool(name="calculate_liquidation_levels")
 @functools.wraps(_calculate_liquidation_levels)
 def calculate_liquidation_levels(
-    symbol: str = "BTC", exchange: str = "binance", current_price: Optional[float] = None
+    symbol: str = "BTC", exchange: str = "okx", current_price: Optional[float] = None
 ) -> Dict[str, Any]:
     return _calculate_liquidation_levels(symbol, exchange, current_price)
 

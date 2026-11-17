@@ -10,162 +10,151 @@ import logging
 import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
-import requests
 import numpy as np
 import pandas as pd
 import ccxt
 from fastmcp import FastMCP
 
+from desk_common import tool_serializer, fetch_with_fallback, http_get_json, HttpError
 from validators import validate_symbol, validate_positive_int
 
 # Initialize FastMCP server
 
 
-def _json_native(obj):
-    """Ultimo recurso del serializador (fix 2026-07-27, caso real 1 del Salon):
-    numpy.bool_/int64/float64 y arrays rompian la serializacion pydantic de
-    fastmcp (PydanticSerializationError: numpy.bool) y con ello la sesion stdio
-    quedaba inutilizable. item()/tolist() los vuelve tipos nativos; str() cubre
-    cualquier otro tipo exotico. Fail-open deliberado: mejor un string feo que
-    una tool muerta."""
-    if hasattr(obj, "tolist"):
-        return obj.tolist()  # arrays -> list; escalares numpy -> escalar nativo
-    if hasattr(obj, "item"):
-        return obj.item()
-    return str(obj)
+_tool_serializer = tool_serializer  # backwards-compatible alias
 
-
-def _tool_serializer(result) -> str:
-    return json.dumps(result, default=_json_native, ensure_ascii=False)
-
-mcp = FastMCP("Crypto Technical Analysis CCXT", tool_serializer=_tool_serializer)
+mcp = FastMCP("Crypto Technical Analysis CCXT", tool_serializer=tool_serializer)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CCXT exchanges for data fetching (reliable ones)
-EXCHANGES = {
-    'binance': ccxt.binance(),
-    'kraken': ccxt.kraken(),
-    'bitfinex': ccxt.bitfinex(),
-    'kucoin': ccxt.kucoin()
+# V2: OHLCV comes from desk_common.fetch_with_fallback over exchange_priority("spot")
+# (okx, kraken, coinbase, ...; DESK_EXCHANGES overrides). Binance is geo-blocked from cloud.
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+_CG_OHLC_DAYS = (1, 7, 14, 30, 90, 180, 365)
+_COIN_MAP = {
+    'BTC': 'bitcoin', 'ETH': 'ethereum', 'ADA': 'cardano',
+    'SOL': 'solana', 'DOT': 'polkadot', 'LINK': 'chainlink',
+    'MATIC': 'matic-network', 'DOGE': 'dogecoin', 'AVAX': 'avalanche-2',
+    'ATOM': 'cosmos', 'XRP': 'ripple', 'LTC': 'litecoin'
 }
 
-# Fallback data sources
-DATA_SOURCES = {
-    'coingecko': 'https://api.coingecko.com/api/v3/coins/{}/ohlc?vs_currency=usd&days={}',
-}
+
+def _ohlcv_to_df(rows) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df.dropna().reset_index(drop=True)
+
 
 def safe_fetch_ohlcv_data(symbol: str, days: int = 100, timeframe: str = '1d') -> Optional[pd.DataFrame]:
-    """Fetch OHLCV data using CCXT exchanges with CoinGecko fallback"""
+    """Fetch the latest ``days`` candles from the first reachable venue in priority order
+    (okx first). CoinGecko is used only as a last resort and is flagged in ``df.attrs``:
+    ``source``, ``synthetic_ohlc`` and ``volume_available``.
+    """
+    symbol_ccxt = f"{symbol.upper()}/USDT"
     try:
-        # First try CCXT exchanges
-        symbol_ccxt = f"{symbol.upper()}/USDT"
-        
-        for exchange_name, exchange in EXCHANGES.items():
-            try:
-                logger.info(f"Trying {exchange_name} for {symbol_ccxt}")
-                
-                # Calculate since timestamp (days ago)
-                since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-                
-                # Fetch OHLCV data
-                ohlcv = exchange.fetch_ohlcv(symbol_ccxt, timeframe, since=since, limit=days)
-                
-                if ohlcv and len(ohlcv) > 10:
-                    # Convert to DataFrame
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    
-                    # Ensure all numeric columns are float
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-                    
-                    # Remove any NaN rows
-                    df = df.dropna()
-                    
-                    if len(df) >= 10:
-                        logger.info(f"Successfully fetched {len(df)} candles from {exchange_name}")
-                        return df
-                        
-            except Exception as e:
-                logger.warning(f"Failed to fetch from {exchange_name}: {str(e)}")
-                continue
-        
-        # Fallback to CoinGecko if CCXT fails
-        logger.info("CCXT failed, trying CoinGecko fallback")
-        return fetch_coingecko_fallback(symbol, days)
-        
+        tf_ms = ccxt.Exchange.parse_timeframe(timeframe) * 1000
+    except Exception:
+        tf_ms = 86_400_000
+
+    def _fetch(ex):
+        # No ``since``: venues cap ``limit`` (OKX 300), and a ``since`` far in the past would
+        # return the OLDEST candles. Without it every venue returns the most recent ones.
+        rows = ex.fetch_ohlcv(symbol_ccxt, timeframe, limit=days)
+        if not rows or len(rows) <= 10:
+            return None
+        age_ms = datetime.now().timestamp() * 1000 - rows[-1][0]
+        if age_ms > 3 * tf_ms:
+            raise ValueError(f"stale candles (last is {age_ms / 3.6e6:.0f}h old)")
+        return rows
+
+    try:
+        rows, used, errors = fetch_with_fallback(_fetch, market="spot")
+        df = _ohlcv_to_df(rows)
+        if len(df) >= 10:
+            df.attrs.update({"source": used, "synthetic_ohlc": False, "volume_available": True})
+            logger.info(f"Fetched {len(df)} candles from {used}")
+            return df
     except Exception as e:
-        logger.error(f"Error in safe_fetch_ohlcv_data: {str(e)}")
-        return None
+        logger.warning(f"All exchanges failed for {symbol_ccxt}: {str(e)[:300]}")
+
+    logger.info("CCXT failed, trying CoinGecko fallback (last resort)")
+    return fetch_coingecko_fallback(symbol, days)
+
 
 def fetch_coingecko_fallback(symbol: str, days: int) -> Optional[pd.DataFrame]:
-    """Fallback to CoinGecko for OHLCV data"""
+    """Last-resort CoinGecko data. Never fabricates volume:
+
+    - ``/ohlc``: real but coarse OHLC (4-day candles beyond 30d), no volume -> volume NaN.
+    - ``/market_chart``: close-only series; OHLC is synthesized -> ``synthetic_ohlc=True``.
+    """
+    coin_id = _COIN_MAP.get(symbol.upper(), symbol.lower())
     try:
-        # CoinGecko format: BTC -> bitcoin
-        coin_map = {
-            'BTC': 'bitcoin', 'ETH': 'ethereum', 'ADA': 'cardano',
-            'SOL': 'solana', 'DOT': 'polkadot', 'LINK': 'chainlink',
-            'MATIC': 'matic-network', 'DOGE': 'dogecoin', 'AVAX': 'avalanche-2',
-            'ATOM': 'cosmos', 'XRP': 'ripple', 'LTC': 'litecoin'
-        }
-        coin_id = coin_map.get(symbol.upper(), symbol.lower())
-        url = DATA_SOURCES['coingecko'].format(coin_id, min(days, 180))
-        
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            if data and len(data) > 0:
-                # CoinGecko returns [timestamp, open, high, low, close]
-                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df['volume'] = 1000000  # Default volume for calculations
-                df = df.sort_values('timestamp').reset_index(drop=True)
-                
-                # Ensure all numeric columns are float
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                
-                # Remove any NaN rows
-                df = df.dropna()
-                
-                if len(df) > 10:
-                    return df
-                    
-        # Final fallback to simple price data
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
-        response = requests.get(url, timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if 'prices' in data and len(data['prices']) > 0:
-                prices = data['prices']
-                volumes = data.get('total_volumes', [[p[0], 1000000] for p in prices])
-                
-                df = pd.DataFrame(prices, columns=['timestamp', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df['volume'] = [v[1] if len(v) > 1 else 1000000 for v in volumes[:len(df)]]
-                
-                # Create OHLC from close prices (approximation)
-                df['open'] = df['close'].shift(1).fillna(df['close'])
-                df['high'] = df[['open', 'close']].max(axis=1) * 1.001  # Small variation
-                df['low'] = df[['open', 'close']].min(axis=1) * 0.999   # Small variation
-                
-                # Ensure all numeric columns are float
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                
-                df = df.dropna()
-                
-                if len(df) > 10:
-                    return df
-                    
+        cg_days = next((d for d in _CG_OHLC_DAYS if d >= days), 365)
+        data = http_get_json(f"{COINGECKO_BASE}/coins/{coin_id}/ohlc",
+                             params={"vs_currency": "usd", "days": cg_days}, ttl=300)
+        if data and len(data) > 10:
+            df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            df = df.dropna().sort_values('timestamp').reset_index(drop=True)
+            df['volume'] = np.nan
+            if len(df) > 10:
+                df.attrs.update({"source": "coingecko_ohlc", "synthetic_ohlc": False,
+                                 "volume_available": False})
+                return df
     except Exception as e:
-        logger.error(f"CoinGecko fallback failed: {str(e)}")
-        
+        logger.warning(f"CoinGecko /ohlc fallback failed: {str(e)[:200]}")
+
+    try:
+        data = http_get_json(f"{COINGECKO_BASE}/coins/{coin_id}/market_chart",
+                             params={"vs_currency": "usd", "days": days}, ttl=300)
+        prices = (data or {}).get('prices') or []
+        if len(prices) > 10:
+            df = pd.DataFrame(prices, columns=['timestamp', 'close'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df = df.dropna().reset_index(drop=True)
+            # Synthesized OHLC (flagged): open = previous close, high/low = max/min(open, close)
+            df['open'] = df['close'].shift(1).fillna(df['close'])
+            df['high'] = df[['open', 'close']].max(axis=1)
+            df['low'] = df[['open', 'close']].min(axis=1)
+            df['volume'] = np.nan
+            df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+            if len(df) > 10:
+                df.attrs.update({"source": "coingecko_market_chart", "synthetic_ohlc": True,
+                                 "volume_available": False})
+                return df
+    except Exception as e:
+        logger.error(f"CoinGecko market_chart fallback failed: {str(e)[:200]}")
+
     return None
+
+
+def _data_meta(df: Optional[pd.DataFrame], uses_volume: bool = False) -> Dict[str, Any]:
+    """Provenance + data-quality flags to merge into tool outputs."""
+    if df is None:
+        return {}
+    attrs = getattr(df, "attrs", {}) or {}
+    meta: Dict[str, Any] = {}
+    if attrs.get("source"):
+        meta["data_source"] = attrs["source"]
+    warnings = []
+    if attrs.get("synthetic_ohlc"):
+        meta["synthetic_ohlc"] = True
+        warnings.append("OHLC synthesized from close prices (CoinGecko fallback): highs/lows/patterns unreliable")
+    if attrs.get("volume_available") is False:
+        meta["volume"] = None
+        if uses_volume:
+            warnings.append("No volume data from fallback source: volume-based signals skipped")
+    if warnings:
+        meta["data_quality"] = {"level": "degraded", "warnings": warnings}
+    return meta
+
 
 @mcp.tool()
 def calculate_rsi(symbol: str = "BTC", period: int = 14, days: int = 100) -> Dict[str, Any]:
@@ -219,6 +208,7 @@ def calculate_rsi(symbol: str = "BTC", period: int = 14, days: int = 100) -> Dic
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "current_rsi": round(current_rsi, 2),
             "rsi_signal": signal,
             "period": period,
@@ -296,6 +286,7 @@ def calculate_macd(symbol: str = "BTC", fast: int = 12, slow: int = 26, signal: 
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "macd_line": round(current_macd, 6),
             "signal_line": round(current_signal, 6),
             "histogram": round(current_histogram, 6),
@@ -368,6 +359,7 @@ def calculate_bollinger_bands(symbol: str = "BTC", period: int = 20, std_dev: fl
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "current_price": current_price,
             "upper_band": round(current_upper, 2),
             "middle_band": round(current_middle, 2),
@@ -495,6 +487,7 @@ def detect_chart_patterns(symbol: str = "BTC", days: int = 60) -> Dict[str, Any]
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "patterns_detected": patterns_detected,
             "total_patterns": len(patterns_detected),
             "current_price": current_price,
@@ -596,6 +589,7 @@ def calculate_moving_averages(symbol: str = "BTC", periods: List[int] = None, da
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "current_price": current_price,
             "moving_averages": ma_results,
             "crossover_signals": crossover_signals,
@@ -608,15 +602,63 @@ def calculate_moving_averages(symbol: str = "BTC", periods: List[int] = None, da
         logger.exception("Moving averages calculation failed")
         return {"error": f"Moving averages calculation failed: {str(e)}", "error_type": type(e).__name__}
 
+def _round_price(x: float) -> float:
+    """Round to 2 decimals for large prices, more significant digits for small ones."""
+    if not x or not math.isfinite(x):
+        return x
+    return round(x, max(2, 5 - int(math.floor(math.log10(abs(x))))))
+
+
+def _swing_points(series: pd.Series, window: int, kind: str) -> List[Tuple[int, float]]:
+    """Confirmed swing highs (kind='high') or swing lows (kind='low'): bar i is the
+    extreme of [i-window, i+window]. The last ``window`` bars are unconfirmed and skipped."""
+    vals = series.astype(float).to_numpy()
+    out = []
+    for i in range(window, len(vals) - window):
+        seg = vals[i - window:i + window + 1]
+        if (kind == "high" and vals[i] >= seg.max()) or (kind == "low" and vals[i] <= seg.min()):
+            out.append((i, float(vals[i])))
+    return out
+
+
+def _cluster_levels(points: List[Tuple[int, float]], tolerance: float = 0.02) -> List[Dict[str, Any]]:
+    """Greedy 1-D clustering of pivot prices (within ``tolerance`` of the cluster mean)."""
+    clusters: List[List[Tuple[int, float]]] = []
+    for idx, price in sorted(points, key=lambda p: p[1]):
+        if clusters:
+            mean = sum(p for _, p in clusters[-1]) / len(clusters[-1])
+            if abs(price - mean) / mean <= tolerance:
+                clusters[-1].append((idx, price))
+                continue
+        clusters.append([(idx, price)])
+    levels = []
+    for c in clusters:
+        prices = [p for _, p in c]
+        levels.append({
+            "price": sum(prices) / len(prices),
+            "touches": len(c),
+            "strength": len(c),
+            "last_touch_bar": max(i for i, _ in c),
+        })
+    return levels
+
+
 @mcp.tool()
 def get_support_resistance(symbol: str = "BTC", days: int = 90) -> Dict[str, Any]:
     """
-    Identify key support and resistance levels
-    
+    Identify key support and resistance levels from typed swing pivots.
+
+    Support candidates come only from swing LOWS and resistance candidates only from
+    swing HIGHS (clustered within 2%). ``support_levels`` are strictly below the current
+    price (nearest first, descending); ``resistance_levels`` strictly above (nearest first,
+    ascending). Swing highs already broken (now below price) are listed separately in
+    ``broken_resistance`` (possible support flips); swing lows now above price in
+    ``broken_support``. ``touches`` = number of pivots in the cluster (more = stronger).
+
     Args:
         symbol: Cryptocurrency symbol
         days: Historical data days to analyze
-        
+
     Returns:
         Support and resistance levels with strength analysis
     """
@@ -624,80 +666,65 @@ def get_support_resistance(symbol: str = "BTC", days: int = 90) -> Dict[str, Any
         df = safe_fetch_ohlcv_data(symbol, days)
         if df is None or len(df) < 20:
             return {"error": f"Insufficient data for {symbol}. Need at least 20 data points."}
-            
+
         high_prices = df['high'].astype(float)
         low_prices = df['low'].astype(float)
         close_prices = df['close'].astype(float)
         current_price = float(close_prices.iloc[-1])
-        
-        # Find pivot points
-        def find_pivots(prices, window=5):
-            pivots = []
-            for i in range(window, len(prices) - window):
-                if all(prices.iloc[i] >= prices.iloc[i-window:i+window+1]):
-                    pivots.append((i, float(prices.iloc[i]), 'HIGH'))
-                elif all(prices.iloc[i] <= prices.iloc[i-window:i+window+1]):
-                    pivots.append((i, float(prices.iloc[i]), 'LOW'))
-            return pivots
-        
-        high_pivots = find_pivots(high_prices)
-        low_pivots = find_pivots(low_prices)
-        
-        # Cluster similar price levels
-        def cluster_levels(pivots, tolerance=0.02):
-            if not pivots:
-                return []
-                
-            levels = []
-            pivot_prices = [p[1] for p in pivots]
-            
-            for price in pivot_prices:
-                # Find similar prices within tolerance
-                similar_prices = [p for p in pivot_prices if abs(p - price) / price < tolerance]
-                
-                if len(similar_prices) >= 2:  # At least 2 touches
-                    avg_price = sum(similar_prices) / len(similar_prices)
-                    strength = len(similar_prices)
-                    
-                    # Avoid duplicates
-                    if not any(abs(level['price'] - avg_price) / avg_price < tolerance/2 for level in levels):
-                        levels.append({
-                            'price': round(avg_price, 2),
-                            'strength': strength,
-                            'touches': len(similar_prices)
-                        })
-            
-            return sorted(levels, key=lambda x: x['strength'], reverse=True)
-        
-        resistance_levels = cluster_levels(high_pivots)
-        support_levels = cluster_levels(low_pivots)
-        
-        # Filter levels near current price
-        nearby_resistance = [r for r in resistance_levels if r['price'] > current_price]
-        nearby_support = [s for s in support_levels if s['price'] < current_price]
-        
-        # Get closest levels
-        next_resistance = min(nearby_resistance, key=lambda x: x['price']) if nearby_resistance else None
-        next_support = max(nearby_support, key=lambda x: x['price']) if nearby_support else None
-        
-        # Calculate distances
-        resistance_distance = ((next_resistance['price'] - current_price) / current_price * 100) if next_resistance else None
-        support_distance = ((current_price - next_support['price']) / current_price * 100) if next_support else None
-        
+        window = 5 if len(df) >= 40 else 3
+
+        resistance_candidates = _cluster_levels(_swing_points(high_prices, window, "high"))
+        support_candidates = _cluster_levels(_swing_points(low_prices, window, "low"))
+
+        def _fmt(level):
+            return {
+                "price": _round_price(level["price"]),
+                "touches": level["touches"],
+                "strength": level["strength"],
+                "distance_pct": round((level["price"] - current_price) / current_price * 100, 2),
+            }
+
+        support_levels = sorted((l for l in support_candidates if l["price"] < current_price),
+                                key=lambda l: l["price"], reverse=True)
+        resistance_levels = sorted((l for l in resistance_candidates if l["price"] > current_price),
+                                   key=lambda l: l["price"])
+        broken_resistance = sorted((l for l in resistance_candidates if l["price"] < current_price),
+                                   key=lambda l: l["price"], reverse=True)
+        broken_support = sorted((l for l in support_candidates if l["price"] > current_price),
+                                key=lambda l: l["price"])
+
+        support_out = [_fmt(l) for l in support_levels[:5]]
+        resistance_out = [_fmt(l) for l in resistance_levels[:5]]
+        next_support = support_out[0] if support_out else None
+        next_resistance = resistance_out[0] if resistance_out else None
+
+        notes = []
+        if not resistance_out:
+            notes.append("No swing high above price in window (price discovery / range high broken)")
+        if not support_out:
+            notes.append("No swing low below price in window (range low broken)")
+
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "current_price": current_price,
-            "resistance_levels": resistance_levels[:5],  # Top 5
-            "support_levels": support_levels[:5],  # Top 5
+            "resistance_levels": resistance_out,
+            "support_levels": support_out,
             "next_resistance": next_resistance,
             "next_support": next_support,
-            "resistance_distance_pct": round(resistance_distance, 2) if resistance_distance else None,
-            "support_distance_pct": round(support_distance, 2) if support_distance else None,
+            "resistance_distance_pct": next_resistance["distance_pct"] if next_resistance else None,
+            "support_distance_pct": round(-next_support["distance_pct"], 2) if next_support else None,
+            "broken_resistance": [_fmt(l) for l in broken_resistance[:3]],
+            "broken_support": [_fmt(l) for l in broken_support[:3]],
+            "range_high": _round_price(float(high_prices.max())),
+            "range_low": _round_price(float(low_prices.min())),
             "total_resistance_levels": len(resistance_levels),
             "total_support_levels": len(support_levels),
+            "pivot_window": window,
+            "notes": notes,
             "analysis_timestamp": datetime.now().isoformat()
         }
-        
+
     except Exception as e:
         logger.exception("Support/Resistance calculation failed")
         return {"error": f"Support/Resistance calculation failed: {str(e)}", "error_type": type(e).__name__}
@@ -775,6 +802,7 @@ def calculate_fibonacci_levels(symbol: str = "BTC", trend: str = "up", days: int
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "current_price": current_price,
             "trend_direction": trend.upper(),
             "swing_high": round(swing_high, 2),
@@ -928,6 +956,7 @@ def get_momentum_indicators(symbol: str = "BTC", days: int = 100) -> Dict[str, A
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "momentum_indicators": indicators,
             "overall_momentum": overall_momentum,
             "bullish_signals": bullish_count,
@@ -955,6 +984,12 @@ def analyze_volume_profile(symbol: str = "BTC", days: int = 30) -> Dict[str, Any
         df = safe_fetch_ohlcv_data(symbol, days)
         if df is None or len(df) < 10:
             return {"error": f"Insufficient data for {symbol}. Need at least 10 data points."}
+        if df.attrs.get("volume_available") is False:
+            return {
+                "symbol": symbol,
+                "error": "Volume profile needs volume data; only a volume-less fallback source was reachable",
+                **_data_meta(df, uses_volume=True),
+            }
             
         close_prices = df['close'].astype(float)
         volumes = df['volume'].astype(float)
@@ -1020,6 +1055,7 @@ def analyze_volume_profile(symbol: str = "BTC", days: int = 30) -> Dict[str, Any
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "volume_profile": volume_profile[:10],  # Top 10 zones
             "high_volume_zones": high_volume_zones,
             "volume_analysis": {
@@ -1086,11 +1122,11 @@ def detect_trend_reversals(symbol: str = "BTC", days: int = 60) -> Dict[str, Any
                 reversal_signals.append("BULLISH_RSI_DIVERGENCE")
                 confidence_score += 25
         
-        # 2. Volume Confirmation
+        # 2. Volume Confirmation (skipped when the data source has no volume)
         avg_volume = volumes.tail(20).mean()
         recent_volume = volumes.tail(5).mean()
         
-        if recent_volume > avg_volume * 1.5:
+        if df.attrs.get("volume_available") is not False and recent_volume > avg_volume * 1.5:
             reversal_signals.append("HIGH_VOLUME_CONFIRMATION")
             confidence_score += 15
         
@@ -1168,6 +1204,7 @@ def detect_trend_reversals(symbol: str = "BTC", days: int = 60) -> Dict[str, Any
         
         return {
             "symbol": symbol,
+            **_data_meta(df, uses_volume=True),
             "reversal_signals": reversal_signals,
             "confidence_score": confidence_score,
             "reversal_probability": reversal_probability,
@@ -1268,6 +1305,7 @@ def calculate_volatility(symbol: str = "BTC", period: int = 30, days: int = 100)
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "current_volatility_pct": round(current_vol, 2),
             "volatility_classification": vol_classification,
             "volatility_trend": vol_trend,
@@ -1594,6 +1632,7 @@ def generate_trading_signals(symbol: str = "BTC", strategy: str = "combined", da
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "strategy": strategy,
             "current_price": current_price,
             "overall_signal": overall_signal,
@@ -1797,6 +1836,7 @@ def backtest_strategy(symbol: str = "BTC", strategy: str = "rsi_oversold", perio
         
         return {
             "symbol": symbol,
+            **_data_meta(df),
             "strategy": strategy,
             "period": period,
             "initial_capital": initial_capital,

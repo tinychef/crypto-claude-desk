@@ -209,3 +209,70 @@ class TestCalculateMarketImpact:
             from crypto_market_microstructure import calculate_market_impact
             result = call_tool(calculate_market_impact, "BTC", "binance")
         assert result["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# V2 regression tests — okx support, no silent binance fallback, geo-block fallback
+# ---------------------------------------------------------------------------
+
+import ccxt  # noqa: E402
+
+import crypto_market_microstructure as ms  # noqa: E402
+
+
+class TestVenueSupport:
+    def test_registry_contains_okx(self):
+        assert "okx" in ms.EXCHANGES
+        assert "kraken" in ms.EXCHANGES
+
+    def test_registry_uses_desk_common_factory(self):
+        sentinel = MagicMock()
+        with patch("crypto_market_microstructure.get_exchange", return_value=sentinel) as ge:
+            assert ms._get_exchange("okx") is sentinel
+        ge.assert_called_once_with("okx", "spot")
+
+    def test_unknown_exchange_does_not_silently_use_binance(self):
+        with pytest.raises(ValueError):
+            ms._get_exchange("fakex")
+        result = call_tool(ms.analyze_orderbook_depth, "BTC", "fakex")
+        assert result["success"] is False
+
+    @pytest.mark.parametrize("tool", [
+        "analyze_orderbook_depth", "detect_orderbook_imbalance", "calculate_spread_metrics",
+        "analyze_order_flow", "detect_spoofing_patterns", "calculate_market_impact",
+    ])
+    def test_okx_accepted_by_every_tool(self, tool):
+        okx = _make_mock_exchange()
+        with patch("crypto_market_microstructure.EXCHANGES", {"okx": okx, "binance": _make_mock_exchange()}):
+            result = call_tool(getattr(ms, tool), "BTC", "okx")
+        assert result["success"] is True, result
+        assert result["exchange_used"] == "okx"
+        assert okx.method_calls  # the okx instance was actually used
+
+    def test_default_exchange_is_okx(self):
+        okx = _make_mock_exchange()
+        with patch("crypto_market_microstructure.EXCHANGES", {"okx": okx, "binance": _make_mock_exchange()}):
+            result = call_tool(ms.analyze_orderbook_depth)
+        assert result["exchange"] == "okx"
+        okx.fetch_order_book.assert_called_once()
+
+
+class TestGeoBlockFallback:
+    def test_binance_451_falls_back_to_okx(self):
+        binance = _make_mock_exchange()
+        binance.fetch_order_book.side_effect = ccxt.ExchangeNotAvailable(
+            "binance 451 Service unavailable from a restricted location")
+        okx = _make_mock_exchange()
+
+        def fake_fallback(fn, exchanges=None, market="spot"):
+            assert "binance" not in exchanges
+            return fn(okx), "okx", []
+
+        with patch("crypto_market_microstructure.EXCHANGES", {"okx": okx, "binance": binance}), \
+             patch("crypto_market_microstructure.fetch_with_fallback", side_effect=fake_fallback), \
+             patch("crypto_market_microstructure.mark_blocked") as mb:
+            result = call_tool(ms.calculate_spread_metrics, "BTC", "binance")
+        assert result["success"] is True
+        assert result["exchange"] == "binance"
+        assert result["exchange_used"] == "okx"
+        mb.assert_called_once_with("binance")

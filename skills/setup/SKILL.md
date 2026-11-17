@@ -51,7 +51,7 @@ uv sync --project <plugin_root>
 
 ### Step 4: Create data directories
 ```bash
-mkdir -p data/trades data/reports data/logs data/db .claude/agent-memory/portfolio-manager
+mkdir -p data/trades data/reports data/logs data/db data/cache .claude/agent-memory/portfolio-manager
 ```
 
 The SQLite database (`data/db/learning.db`) is created automatically by the crypto-learning-db MCP server on first use. No manual initialization needed.
@@ -61,6 +61,13 @@ Test that one MCP server can start by running:
 ```bash
 uv run --frozen --project <plugin_root> python -c "import fastmcp; import ccxt; import numpy; import pandas; print('OK')"
 ```
+
+Then check that every server module imports (15 servers):
+```bash
+cd <plugin_root>/mcp-servers && for m in crypto_ultra_simple crypto_exchange_ccxt_ultra crypto_technical_analysis crypto_futures_data crypto_advanced_indicators crypto_market_microstructure crypto_learning_db crypto_polymarket crypto_defillama crypto_derivatives crypto_macro crypto_flows crypto_onchain crypto_intel crypto_quant; do uv run --frozen --project <plugin_root> python -c "import $m" >/dev/null 2>&1 && echo "OK  $m" || echo "ERR $m"; done
+```
+Servers: crypto-data, crypto-exchange, crypto-technical, crypto-futures, crypto-advanced-indicators, crypto-market-microstructure, crypto-learning-db, crypto-polymarket, crypto-defillama, crypto-derivatives, crypto-macro, crypto-flows, crypto-onchain, crypto-intel, crypto-quant.
+Optional API keys (env `DESK_<PROVIDER>_KEY`, e.g. `DESK_COINALYZE_KEY`): without a key the tool returns `status: unavailable` — not an error. List which keys are set; see `docs/data-sources.md`.
 
 If this fails, diagnose and fix. Common issues:
 - Python version too old → tell user to install Python 3.11+
@@ -81,13 +88,14 @@ Crypto Trading Desk - Setup Complete
   Python:       3.12.8
   uv:           0.6.13
   Dependencies: 5/5 installed
-  MCP Servers:  7/7 ready
+  MCP Servers:  15/15 ready (keys: 2/6 optional set)
   Data dirs:    Created
   Database:     SQLite ready ($20,000 paper trading)
 
   Ready to use:
     /crypto-trading-desk:quick BTC     (fast market check)
-    /crypto-trading-desk:analyze ETH   (full 5-agent analysis)
+    /crypto-trading-desk:brief         (daily brief)
+    /crypto-trading-desk:analyze ETH   (full multi-agent analysis)
 ```
 
 If anything failed, show exactly what went wrong and how to fix it.

@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 import json
 import logging
 
+from desk_common import tool_serializer, fetch_with_fallback
 from validators import validate_symbol, validate_positive_int, validate_timeframe
 
 logger = logging.getLogger(__name__)
@@ -31,27 +32,14 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 
 
-def _json_native(obj):
-    """Ultimo recurso del serializador (fix 2026-07-27, caso real 1 del Salon):
-    numpy.bool_/int64/float64 y arrays rompian la serializacion pydantic de
-    fastmcp (PydanticSerializationError: numpy.bool) y con ello la sesion stdio
-    quedaba inutilizable. item()/tolist() los vuelve tipos nativos; str() cubre
-    cualquier otro tipo exotico. Fail-open deliberado: mejor un string feo que
-    una tool muerta."""
-    if hasattr(obj, "tolist"):
-        return obj.tolist()  # arrays -> list; escalares numpy -> escalar nativo
-    if hasattr(obj, "item"):
-        return obj.item()
-    return str(obj)
+_tool_serializer = tool_serializer  # backwards-compatible alias
 
+mcp = FastMCP("crypto-advanced-indicators", tool_serializer=tool_serializer)
 
-def _tool_serializer(result) -> str:
-    return json.dumps(result, default=_json_native, ensure_ascii=False)
+# V2: no hardcoded venue. OHLCV comes from desk_common.fetch_with_fallback, which walks
+# exchange_priority("spot") (okx, kraken, coinbase, ... ; DESK_EXCHANGES overrides) and
+# skips geo-blocked venues (Binance/Bybit return 451/403 from cloud IPs).
 
-mcp = FastMCP("crypto-advanced-indicators", tool_serializer=_tool_serializer)
-
-# Reliable exchange
-EXCHANGE = ccxt.binance()
 
 # Indicator thresholds
 MFI_OVERBOUGHT = 80
@@ -65,12 +53,17 @@ VWAP_EXTREME_STD = 2  # Standard deviations for extreme zones
 
 
 def _fetch_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 100):
-    """Helper: Fetch OHLCV data."""
+    """Helper: fetch OHLCV from the first reachable venue in priority order.
+
+    The venue actually used is stored in ``df.attrs["exchange"]``.
+    """
     formatted_symbol = f"{symbol}/USDT"
-    ohlcv = EXCHANGE.fetch_ohlcv(formatted_symbol, timeframe, limit=limit)
+    ohlcv, used, _errors = fetch_with_fallback(
+        lambda ex: ex.fetch_ohlcv(formatted_symbol, timeframe, limit=limit), market="spot")
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.attrs["exchange"] = used
     return df
 
 
@@ -138,6 +131,7 @@ def calculate_obv(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "current_obv": float(df['obv'].iloc[-1]),
             "obv_trend": obv_trend,
@@ -243,6 +237,7 @@ def calculate_mfi(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "period": period,
             "current_mfi": round(float(current_mfi), 2),
@@ -338,6 +333,7 @@ def calculate_adx(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "period": period,
             "current_adx": round(float(current_adx), 2),
@@ -440,6 +436,7 @@ def calculate_ichimoku(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "current_price": float(current_price),
             "tenkan_sen": round(float(tenkan), 2),
@@ -526,6 +523,7 @@ def calculate_vwap(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "periods": periods,
             "current_price": float(current_price),
@@ -608,6 +606,7 @@ def calculate_pivot_points(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "current_price": float(current_price),
             "pivot": round(float(pivot), 2),
@@ -692,6 +691,7 @@ def calculate_williams_r(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "period": period,
             "current_williams_r": round(float(current_wr), 2),
@@ -785,6 +785,7 @@ def detect_divergences(
         return {
             "success": True,
             "symbol": symbol,
+            "exchange_used": df.attrs.get("exchange"),
             "timeframe": timeframe,
             "current_price": float(df['close'].iloc[-1]),
             "current_rsi": round(float(df['rsi'].iloc[-1]), 2),

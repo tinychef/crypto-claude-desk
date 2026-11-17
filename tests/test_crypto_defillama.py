@@ -19,11 +19,8 @@ from helpers import call_tool
 # ---------------------------------------------------------------------------
 
 def _mock_resp(json_data, status=200):
-    resp = MagicMock()
-    resp.status_code = status
-    resp.json.return_value = json_data
-    resp.raise_for_status = MagicMock(return_value=None)
-    return resp
+    """V2: the server uses desk_common.http_get_json, which returns parsed JSON directly."""
+    return json_data
 
 
 CHAINS_SAMPLE = [
@@ -48,7 +45,7 @@ PROTOCOLS_SAMPLE = [
 
 class TestGetTotalTvl:
     def test_success(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(CHAINS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(CHAINS_SAMPLE)):
             from crypto_defillama import get_total_tvl
             result = call_tool(get_total_tvl)
         assert result["success"] is True
@@ -58,13 +55,13 @@ class TestGetTotalTvl:
         assert result["top_10_chains"][0]["share_pct"] == pytest.approx(72.29, rel=1e-2)
 
     def test_unexpected_shape_errors(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp({"oops": "not a list"})):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp({"oops": "not a list"})):
             from crypto_defillama import get_total_tvl
             result = call_tool(get_total_tvl)
         assert result["success"] is False
 
     def test_http_error_handled(self):
-        with patch("crypto_defillama.requests.get", side_effect=Exception("503")):
+        with patch("crypto_defillama.http_get_json", side_effect=Exception("503")):
             from crypto_defillama import get_total_tvl
             result = call_tool(get_total_tvl)
         assert result["success"] is False
@@ -76,7 +73,7 @@ class TestGetTotalTvl:
 
 class TestGetChainTvl:
     def test_success_canonical(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(CHAINS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(CHAINS_SAMPLE)):
             from crypto_defillama import get_chain_tvl
             result = call_tool(get_chain_tvl, "Ethereum")
         assert result["success"] is True
@@ -85,20 +82,20 @@ class TestGetChainTvl:
         assert result["tvl_usd"] == 60_000_000_000
 
     def test_alias_normalization(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(CHAINS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(CHAINS_SAMPLE)):
             from crypto_defillama import get_chain_tvl
             result = call_tool(get_chain_tvl, "eth")
         assert result["success"] is True
         assert result["chain"] == "Ethereum"
 
     def test_alias_solana(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(CHAINS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(CHAINS_SAMPLE)):
             from crypto_defillama import get_chain_tvl
             result = call_tool(get_chain_tvl, "sol")
         assert result["chain"] == "Solana"
 
     def test_not_found(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(CHAINS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(CHAINS_SAMPLE)):
             from crypto_defillama import get_chain_tvl
             result = call_tool(get_chain_tvl, "FakeChainXYZ")
         assert result["success"] is False
@@ -127,7 +124,7 @@ class TestGetProtocolTvl:
             "url": "https://aave.com",
             "twitter": "aave",
         }
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(protocol_data)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(protocol_data)):
             from crypto_defillama import get_protocol_tvl
             result = call_tool(get_protocol_tvl, "aave")
         assert result["success"] is True
@@ -136,7 +133,7 @@ class TestGetProtocolTvl:
         assert result["per_chain_tvl"][0]["chain"] == "Ethereum"
 
     def test_not_found(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp({"error": "not found"})):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp({"error": "not found"})):
             from crypto_defillama import get_protocol_tvl
             result = call_tool(get_protocol_tvl, "nonexistent")
         assert result["success"] is False
@@ -153,7 +150,7 @@ class TestGetProtocolTvl:
 
 class TestGetTopProtocols:
     def test_success(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(PROTOCOLS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(PROTOCOLS_SAMPLE)):
             from crypto_defillama import get_top_protocols
             result = call_tool(get_top_protocols, limit=10)
         assert result["success"] is True
@@ -162,14 +159,14 @@ class TestGetTopProtocols:
         assert result["protocols"][0]["name"] == "Lido"
 
     def test_category_filter(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(PROTOCOLS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(PROTOCOLS_SAMPLE)):
             from crypto_defillama import get_top_protocols
             result = call_tool(get_top_protocols, limit=10, category="Lending")
         assert result["count"] == 1
         assert result["protocols"][0]["name"] == "Aave"
 
     def test_limit_capped(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(PROTOCOLS_SAMPLE)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(PROTOCOLS_SAMPLE)):
             from crypto_defillama import get_top_protocols
             result = call_tool(get_top_protocols, limit=9999)
         # Limit caps at 200 but we only have 3 protocols
@@ -194,7 +191,7 @@ class TestGetStablecoinsOverview:
                 {"name": "Dai", "symbol": "DAI", "circulating": {"peggedUSD": 5_000_000_000}, "chains": ["Ethereum"], "price": 1.0},
             ]
         }
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(sample)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(sample)):
             from crypto_defillama import get_stablecoins_overview
             result = call_tool(get_stablecoins_overview)
         assert result["success"] is True
@@ -203,7 +200,7 @@ class TestGetStablecoinsOverview:
         assert result["top_10"][0]["share_pct"] == 75.0
 
     def test_empty_response(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp({"peggedAssets": []})):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp({"peggedAssets": []})):
             from crypto_defillama import get_stablecoins_overview
             result = call_tool(get_stablecoins_overview)
         assert result["success"] is True
@@ -225,7 +222,7 @@ class TestGetDexVolume24h:
                 {"name": "PancakeSwap", "total24h": 1_200_000_000, "total7d": 9_000_000_000, "change_1d": -0.5, "chains": ["BSC"]},
             ],
         }
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(sample)) as mock_get:
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(sample)) as mock_get:
             from crypto_defillama import get_dex_volume_24h
             result = call_tool(get_dex_volume_24h)
         assert result["success"] is True
@@ -235,7 +232,7 @@ class TestGetDexVolume24h:
 
     def test_chain_specific_url(self):
         sample = {"total24h": 1, "total7d": 1, "change_1d": 0, "protocols": []}
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(sample)) as mock_get:
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(sample)) as mock_get:
             from crypto_defillama import get_dex_volume_24h
             call_tool(get_dex_volume_24h, "Ethereum")
         # Called URL should include the chain name
@@ -244,7 +241,7 @@ class TestGetDexVolume24h:
 
     def test_chain_alias_normalized(self):
         sample = {"total24h": 1, "total7d": 1, "change_1d": 0, "protocols": []}
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(sample)) as mock_get:
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(sample)) as mock_get:
             from crypto_defillama import get_dex_volume_24h
             call_tool(get_dex_volume_24h, "eth")
         called_url = mock_get.call_args.args[0]
@@ -259,7 +256,7 @@ class TestGetChainTvlChange:
     def test_success_inflow(self):
         # 10 days of history, last value 10% above baseline
         history = [{"date": 1_000_000 + i * 86400, "tvl": 100 + i} for i in range(10)]
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(history)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(history)):
             from crypto_defillama import get_chain_tvl_change
             result = call_tool(get_chain_tvl_change, "Ethereum", days=7)
         assert result["success"] is True
@@ -273,7 +270,7 @@ class TestGetChainTvlChange:
             {"date": 1_000_000 + 86400, "tvl": 95},
             {"date": 1_000_000 + 172800, "tvl": 50},
         ]
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp(history)):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp(history)):
             from crypto_defillama import get_chain_tvl_change
             result = call_tool(get_chain_tvl_change, "Ethereum", days=2)
         assert result["change_pct"] == -50
@@ -290,7 +287,7 @@ class TestGetChainTvlChange:
         assert result["success"] is False
 
     def test_empty_history(self):
-        with patch("crypto_defillama.requests.get", return_value=_mock_resp([])):
+        with patch("crypto_defillama.http_get_json", return_value=_mock_resp([])):
             from crypto_defillama import get_chain_tvl_change
             result = call_tool(get_chain_tvl_change, "Ethereum", days=7)
         assert result["success"] is False
@@ -342,3 +339,30 @@ class TestClassifyChange:
     def test_strong_outflow(self):
         from crypto_defillama import _classify_change
         assert _classify_change(-20) == "STRONG_OUTFLOW"
+
+
+# ---------------------------------------------------------------------------
+# V2 regression tests — cached/retrying HTTP layer
+# ---------------------------------------------------------------------------
+
+import crypto_defillama as dl  # noqa: E402
+from desk_common import HttpError, tool_serializer  # noqa: E402
+
+
+class TestHttpLayer:
+    def test_request_uses_http_get_json_with_cache(self):
+        with patch("crypto_defillama.http_get_json", return_value=[]) as mg:
+            dl._request(f"{dl.API_BASE}/v2/chains")
+        assert mg.call_args.args[0] == "https://api.llama.fi/v2/chains"
+        assert mg.call_args.kwargs["ttl"] > 0
+        assert mg.call_args.kwargs["timeout"] == dl.DEFAULT_TIMEOUT
+
+    def test_http_error_becomes_failure(self):
+        err = HttpError("HTTP 429 from https://api.llama.fi/v2/chains", 429, "https://api.llama.fi/v2/chains")
+        with patch("crypto_defillama.http_get_json", side_effect=err):
+            result = call_tool(dl.get_total_tvl)
+        assert result["success"] is False
+        assert "429" in result["error"]
+
+    def test_numpy_safe_serializer(self):
+        assert dl.mcp._tool_serializer is tool_serializer
