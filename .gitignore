@@ -7,7 +7,6 @@ CLAUDE.local.md
 GUIA-DEL-PROYECTO.md
 
 # Generated MCP config (standalone mode)
-.mcp.json
 
 # Python
 venv/
@@ -31,6 +30,7 @@ data/trades/predictions.json
 data/trades/agent-scorecards.json
 data/trades/patterns.json
 data/db/
+data/cache/
 data/reports/*
 !data/reports/.gitkeep
 data/logs/*
