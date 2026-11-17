@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from fastmcp import FastMCP
 
-from desk_common import HttpError, fetch_with_fallback, http_get, http_get_json, tool_serializer
+from desk_common import http_failure, HttpError, fetch_with_fallback, http_get, http_get_json, tool_serializer
 
 logger = logging.getLogger(__name__)
 mcp = FastMCP("crypto-macro", tool_serializer=tool_serializer)
@@ -202,7 +202,11 @@ def get_macro_snapshot() -> Dict[str, Any]:
             except (HttpError, ValueError) as e:
                 gaps.append(f"Stooq {key}: {str(e)[:100]}")
         if not fred and not mkts:
-            return {"status": "error", "error": "all macro sources failed", "data_gaps": gaps, "source": "fred,stooq"}
+            blocked = all("not reachable" in g or "ProxyError" in g or "Tunnel" in g for g in gaps) if gaps else False
+            return {"status": "unavailable" if blocked else "error",
+                    "reason" if blocked else "error": ("hosts fred.stlouisfed.org / stooq.com not reachable from this environment"
+                                                       if blocked else "all macro sources failed"),
+                    "data_gaps": gaps, "source": "fred,stooq"}
         label, score, drivers = _risk_read(fred, mkts)
         curve = (fred.get("T10Y2Y") or {}).get("last")
         extra = ""
@@ -308,7 +312,7 @@ def get_crypto_macro_correlation(window_days: int = 30) -> Dict[str, Any]:
             out["data_gaps"] = gaps
         return out
     except HttpError as e:
-        return {"status": "error", "error": str(e), "source": "stooq,fred"}
+        return http_failure(e, "stooq,fred")
     except Exception as e:
         logger.exception("get_crypto_macro_correlation failed")
         return {"status": "error", "error": f"{e.__class__.__name__}: {e}"}

@@ -193,3 +193,32 @@ class TestExchanges:
         with patch.object(ex_mod, "get_exchange", return_value=MagicMock()):
             res, used, errors = ex_mod.fetch_with_fallback(lambda ex: next(results), exchanges=["okx", "kraken"])
         assert res == [1, 2] and used == "kraken" and "empty" in errors[0]
+
+
+# ---------------------------------------------------------------- blocked hosts
+class TestBlockedHosts:
+    def test_proxy_error_marks_blocked_without_retries(self):
+        session = MagicMock()
+        session.get.side_effect = requests.exceptions.ProxyError("Tunnel connection failed: 403 Forbidden")
+        with patch.object(http_mod, "_get_session", return_value=session):
+            with pytest.raises(desk_common.HttpError) as ei:
+                desk_common.http_get("https://blocked.test/x", ttl=0, retries=3)
+        assert ei.value.blocked is True
+        assert session.get.call_count == 1
+
+    def test_451_marks_blocked(self):
+        session = MagicMock()
+        session.get.return_value = _resp(451, "")
+        with patch.object(http_mod, "_get_session", return_value=session):
+            with pytest.raises(desk_common.HttpError) as ei:
+                desk_common.http_get("https://geo.test/x", ttl=0)
+        assert ei.value.blocked is True
+
+    def test_http_failure_blocked_is_unavailable(self):
+        err = desk_common.HttpError("network error", None, "https://www.deribit.com/api/v2/x", blocked=True)
+        out = desk_common.http_failure(err, "deribit")
+        assert out["status"] == "unavailable" and "www.deribit.com" in out["reason"]
+
+    def test_http_failure_other_is_error(self):
+        err = desk_common.HttpError("HTTP 500", 500, "https://x.test")
+        assert desk_common.http_failure(err, "x")["status"] == "error"

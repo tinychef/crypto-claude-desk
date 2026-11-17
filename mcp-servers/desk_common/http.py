@@ -25,10 +25,31 @@ _cache_lock = threading.Lock()
 
 
 class HttpError(Exception):
-    def __init__(self, message: str, status: Optional[int] = None, url: str = ""):
+    def __init__(self, message: str, status: Optional[int] = None, url: str = "", blocked: bool = False):
         super().__init__(message)
         self.status = status
         self.url = url
+        # True when the host is not reachable from this environment (proxy/allowlist
+        # refusal or geo-block). Callers should report it as "unavailable", not "error".
+        self.blocked = blocked
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url).hostname or url
+    except Exception:
+        return url
+
+
+def http_failure(err: Exception, provider: str) -> dict:
+    """Uniform tool result for an HttpError: blocked hosts -> unavailable, else error."""
+    if isinstance(err, HttpError) and err.blocked:
+        host = _host(err.url)
+        return {"status": "unavailable", "provider": provider,
+                "reason": f"host {host} not reachable from this environment",
+                "hint": f"Allow {host} in the environment network settings (see docs/data-sources.md)."}
+    return {"status": "error", "error": str(err), "source": provider}
 
 
 def _get_session() -> requests.Session:
@@ -120,12 +141,17 @@ def http_get(
         try:
             resp = session.get(url, params=params, headers=headers, timeout=timeout)
         except requests.RequestException as e:
-            last_err = HttpError(f"network error: {e.__class__.__name__}: {e}", None, url)
+            msg = str(e)
+            blocked = isinstance(e, requests.exceptions.ProxyError) or "Tunnel connection failed" in msg
+            last_err = HttpError(f"network error: {e.__class__.__name__}: {e}", None, url, blocked=blocked)
+            if blocked:
+                break  # proxy refusal is deterministic; retrying only wastes time
         else:
             if resp.status_code == 200:
                 _cache_put(key, resp.text)
                 return resp.text
-            last_err = HttpError(f"HTTP {resp.status_code} from {url}", resp.status_code, url)
+            last_err = HttpError(f"HTTP {resp.status_code} from {url}", resp.status_code, url,
+                                 blocked=resp.status_code == 451)
             if resp.status_code not in (429, 500, 502, 503, 504):
                 break  # 4xx (incl. 451 geo-block, 403) won't improve with retries
             retry_after = resp.headers.get("Retry-After")

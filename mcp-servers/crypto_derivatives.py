@@ -25,6 +25,7 @@ from fastmcp import FastMCP
 
 from desk_common import (
     HttpError,
+    http_failure,
     base_symbol,
     get_exchange,
     get_key,
@@ -120,7 +121,8 @@ def _http_post_json(url: str, payload: Dict[str, Any], ttl: float = 30, timeout:
     try:
         resp = session.post(url, json=payload, timeout=timeout)
     except requests.RequestException as e:
-        raise HttpError(f"network error: {e.__class__.__name__}: {e}", None, url)
+        blocked = isinstance(e, requests.exceptions.ProxyError) or "Tunnel connection failed" in str(e)
+        raise HttpError(f"network error: {e.__class__.__name__}: {e}", None, url, blocked=blocked)
     if resp.status_code != 200:
         raise HttpError(f"HTTP {resp.status_code} from {url}", resp.status_code, url)
     try:
@@ -453,7 +455,7 @@ def get_aggregated_oi(symbol: str = "BTC", interval: str = "1hour", hours: int =
         out["interpretation"] = _oi_read(change, out["funding_rate_8h_pct"])
         return out
     except HttpError as e:
-        return {"status": "error", "error": str(e), "source": "coinalyze"}
+        return http_failure(e, "coinalyze")
     except Exception as e:
         logger.exception("get_aggregated_oi failed")
         return {"status": "error", "error": f"{e.__class__.__name__}: {e}"}
@@ -520,7 +522,7 @@ def get_liquidations_history(symbol: str = "BTC", interval: str = "1hour", hours
             "cascades": cascades[-10:], "interpretation": read,
         }
     except HttpError as e:
-        return {"status": "error", "error": str(e), "source": "coinalyze"}
+        return http_failure(e, "coinalyze")
     except Exception as e:
         logger.exception("get_liquidations_history failed")
         return {"status": "error", "error": f"{e.__class__.__name__}: {e}"}
@@ -611,7 +613,7 @@ def get_options_snapshot(currency: str = "BTC") -> Dict[str, Any]:
             out["data_gaps"] = data_gaps
         return out
     except HttpError as e:
-        return {"status": "error", "error": str(e), "source": "deribit"}
+        return http_failure(e, "deribit")
     except Exception as e:
         logger.exception("get_options_snapshot failed")
         return {"status": "error", "error": f"{e.__class__.__name__}: {e}"}
@@ -669,7 +671,7 @@ def get_max_pain(currency: str = "BTC", expiry: Optional[str] = None) -> Dict[st
             "upcoming_expiries": upcoming, "interpretation": read,
         }
     except HttpError as e:
-        return {"status": "error", "error": str(e), "source": "deribit"}
+        return http_failure(e, "deribit")
     except Exception as e:
         logger.exception("get_max_pain failed")
         return {"status": "error", "error": f"{e.__class__.__name__}: {e}"}
@@ -845,7 +847,7 @@ def get_hyperliquid_market(symbol: str = "BTC") -> Dict[str, Any]:
             read += f"; mark {'above' if row['premium_pct'] > 0 else 'below'} oracle by {abs(row['premium_pct']):.3f}%"
         return {"status": "success", "source": "hyperliquid", "as_of": _iso(), **row, "interpretation": read}
     except HttpError as e:
-        return {"status": "error", "error": str(e), "source": "hyperliquid"}
+        return http_failure(e, "hyperliquid")
     except Exception as e:
         logger.exception("get_hyperliquid_market failed")
         return {"status": "error", "error": f"{e.__class__.__name__}: {e}"}
