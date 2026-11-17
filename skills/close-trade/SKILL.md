@@ -25,7 +25,7 @@ After the trade is closed, delegate using the Task tool with `subagent_type: gen
 Run a post-mortem analysis on the recently closed trade $ARGUMENTS.
 Call query_trades(status='closed', limit=1) from crypto-learning-db to get the trade data.
 Read any related reports from data/reports/.
-Analyze what worked, what didn't, and provide specific recommendations for improvement.
+Use get_regime_history() for the trade's window. Follow Mission 4 and write the post-mortem file (≤40 lines, docs/output-format.md §1).
 Do NOT use the Edit tool."
 
 ### Step 3: Validate Predictions & Update Patterns
@@ -39,7 +39,7 @@ Then call upsert_pattern() to update the pattern library with the setup from thi
 Do NOT use the Edit tool."
 
 ### Step 4: Present Results
-Show:
+Show (Spanish, ≤20 lines):
 1. Trade closure summary (entry, exit, PnL)
 2. Post-mortem analysis
 3. Prediction accuracy (how many correct vs incorrect, with evaluations)

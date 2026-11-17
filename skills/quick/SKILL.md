@@ -1,31 +1,32 @@
 ---
 name: quick
-description: Quick single-agent market check. Usage: /quick BTC or /quick ETH
+description: Quick single-agent market check (≤6 lines). Usage: /quick BTC or /quick ETH
 user-invocable: true
 ---
 
 # Quick Market Check
 
-Get a fast snapshot of $ARGUMENTS using a single agent. No team needed.
+Fast snapshot of $ARGUMENTS with ONE agent. No reports written.
 
 ## Workflow
 
-1. Delegate using the Task tool with `subagent_type: general-purpose` and `model: haiku`:
+1. Task with `subagent_type: general-purpose`, `model: haiku`:
 
-   "You are the market-monitor agent. Quick market snapshot for $ARGUMENTS.
-   Use these MCP tools (call them in parallel):
-   - get_exchange_prices(symbol='{SYMBOL}/USDT') for live price, 24h change, volume
-   - get_fear_greed_index() for market sentiment
-   - get_funding_rate(symbol='{SYMBOL}') for futures funding rate
-   Also run a WebSearch for '{SYMBOL} crypto news today' to catch any breaking events.
-   Be concise — this is a quick check, not a full analysis.
+   "You are the market-monitor agent. Quick snapshot for $ARGUMENTS. Call in ONE parallel batch:
+   - get_exchange_prices(symbol='{SYMBOL}/USDT') (crypto-exchange) — price, 24h change, volume
+   - get_fear_greed_index() (crypto-data)
+   - get_funding_rate(symbol='{SYMBOL}', exchange='okx') (crypto-futures) and get_aggregated_oi(symbol='{SYMBOL}') (crypto-derivatives)
+   - classify_regime(symbol='{SYMBOL}') (crypto-quant) and get_support_resistance(symbol='{SYMBOL}/USDT') (crypto-technical)
+   No WebSearch unless price moved >5% in 24h (then 1 query for the cause).
+   Tool returns unavailable/error → write 'n/d', never invent.
+   Reply ONLY in this format (Spanish, ≤6 lines):
+   **{SYMBOL} {price}** ({chg24h}%) · régimen: <3 palabras>
+   Funding {x}%/8h · OI {Δ24h}% · F&G {n} (<label>)
+   Niveles: ↑ {resistance} · ↓ {support}
+   ¿`/analyze {SYMBOL}`? sí/no — <motivo en ≤12 palabras>
    Do NOT use the Edit tool."
 
-2. Present the result directly to the user. Keep it brief.
+2. Show the agent's lines as-is (`docs/output-format.md` §4). Nothing else.
 
-## When to suggest deeper analysis
-If the agent detects any of these, suggest running `/analyze $ARGUMENTS`:
-- Price change >5% in 24h
-- Extreme Fear or Extreme Greed
-- Funding rate anomaly (>0.05% or <-0.05%)
-- Volume spike >2x average
+## When "¿/analyze?" = sí
+Price change >5% in 24h · F&G ≤ 15 or ≥ 85 · funding >0.05% or <-0.05%/8h · OI Δ24h >10% · price within 1% of a key level · regime just flipped.

@@ -24,9 +24,9 @@ You can create three types of components:
 ### 1. MCP Servers (Python)
 
 Before generating:
-1. Read `mcp-servers/validators.py` — reuse validation functions
+1. Read `mcp-servers/validators.py` — reuse validation functions — and `mcp-servers/desk_common/` (http_get with cache/backoff/proxy, get_exchange OKX-first, get_key/unavailable, tool_serializer); new servers must use it (hardened template in `docs/extending.md`)
 2. Read at least 2 existing MCP servers to understand the pattern:
-   - `mcp-servers/crypto_ultra_simple.py` (simple CoinGecko API)
+   - `mcp-servers/crypto_macro.py` or `mcp-servers/crypto_flows.py` (HTTP APIs via desk_common)
    - `mcp-servers/crypto_exchange_ccxt_ultra.py` (CCXT-based)
 3. Use WebSearch to find the target API documentation
 4. Use WebFetch to read API docs and understand endpoints, auth, rate limits
@@ -144,15 +144,15 @@ You are the **Agent Name**. [Role description].
 2. What to analyze
 3. How to present results
 
-## Output Format
-[Define the structure of the agent's output]
+## Output
+Follow `docs/output-format.md` §1 (≤40 lines + JSON block). Role key `{name}`.
 ```
 
 Rules for agents:
 - Choose model tier wisely: haiku (data gathering), sonnet (analysis), opus (decisions)
 - Always set `disallowedTools` — principle of least privilege
 - Include specific, numbered instructions (agents perform better with concrete steps)
-- Define output format explicitly
+- Output section must point to `docs/output-format.md` (§1 for analyst reports) — no bespoke long formats
 - Write the file to `agents/{name}.md`
 
 ### 3. Skills (Markdown)
@@ -183,9 +183,7 @@ Delegate to `agent-name` agent:
 [Next step...]
 
 ### Output
-Present:
-1. [What to show]
-2. [What to show]
+Answer per `docs/output-format.md` (§3 brief ≤25 lines in Spanish for decisions; shorter for status checks).
 ```
 
 Rules for skills:
