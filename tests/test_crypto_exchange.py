@@ -60,6 +60,8 @@ def _make_mock_exchange():
 
 
 MOCK_EXCHANGES = {
+    "okx": _make_mock_exchange(),
+    "coinbase": _make_mock_exchange(),
     "binance": _make_mock_exchange(),
     "kraken": _make_mock_exchange(),
     "bitfinex": _make_mock_exchange(),
@@ -333,3 +335,153 @@ class TestGetMarketDepthAnalysis:
             from crypto_exchange_ccxt_ultra import get_market_depth_analysis
             result = call_tool(get_market_depth_analysis, "binance", "BTC")
         assert result["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# V2 regression tests — venue registry, okx/coinbase, geo-block fallback
+# ---------------------------------------------------------------------------
+
+import ccxt  # noqa: E402
+
+import crypto_exchange_ccxt_ultra as cex  # noqa: E402
+
+
+class TestVenueRegistry:
+    def test_registry_supports_okx_and_coinbase(self):
+        assert "okx" in cex.EXCHANGES
+        assert "coinbase" in cex.EXCHANGES
+        assert "kraken" in cex.EXCHANGES
+        assert "fakexchange" not in cex.EXCHANGES
+
+    def test_registry_builds_instances_via_desk_common(self):
+        sentinel = MagicMock()
+        with patch("crypto_exchange_ccxt_ultra.get_exchange", return_value=sentinel) as ge:
+            assert cex.EXCHANGES["okx"] is sentinel
+        ge.assert_called_once_with("okx", "spot")
+
+    def test_registry_iterates_in_priority_order(self, monkeypatch):
+        monkeypatch.delenv("DESK_EXCHANGES", raising=False)
+        names = list(cex.EXCHANGES)
+        assert names[0] == "okx"
+        assert names.index("okx") < names.index("binance")
+
+    def test_desk_exchanges_env_controls_order(self, monkeypatch):
+        monkeypatch.setenv("DESK_EXCHANGES", "kraken,okx")
+        assert list(cex.EXCHANGES)[:2] == ["kraken", "okx"]
+
+
+class TestOkxAndCoinbaseAccepted:
+    @pytest.mark.parametrize("venue", ["okx", "coinbase", "OKX"])
+    def test_single_venue_tools_accept_okx_coinbase(self, venue):
+        with _patch_exchanges():
+            for tool, args in [
+                (cex.get_trading_pairs, (venue,)),
+                (cex.get_orderbook_data, ("BTC/USDT", venue)),
+                (cex.fetch_ohlcv_data, ("1h", venue, "BTC/USDT")),
+                (cex.fetch_recent_trades, (venue, "BTC/USDT")),
+                (cex.get_market_depth_analysis, (venue, "BTC/USDT")),
+            ]:
+                result = call_tool(tool, *args)
+                assert result["status"] == "success", (tool, result)
+                assert result["exchange_used"] == venue.lower()
+
+    def test_default_exchange_is_okx(self):
+        with _patch_exchanges():
+            result = call_tool(cex.fetch_ohlcv_data)
+        assert result["status"] == "success"
+        assert result["exchange_used"] == "okx"
+
+    def test_bare_symbol_normalized_to_pair(self):
+        ex = _make_mock_exchange()
+        with patch("crypto_exchange_ccxt_ultra.EXCHANGES", {"okx": ex}):
+            result = call_tool(cex.get_exchange_prices, "btc", ["okx"])
+        ex.fetch_ticker.assert_called_with("BTC/USDT")
+        assert result["symbol"] == "BTC/USDT"
+
+
+class TestUnknownVenuesReported:
+    def test_prices_report_unknown_exchange(self):
+        with _patch_exchanges():
+            result = call_tool(cex.get_exchange_prices, "BTC/USDT", ["okx", "fakex"])
+        assert result["status"] == "success"
+        assert "okx" in result["exchanges"]
+        assert any("fakex" in e for e in result["errors"])
+
+    def test_volume_report_unknown_exchange(self):
+        with _patch_exchanges():
+            result = call_tool(cex.get_exchange_volume, "BTC/USDT", ["kraken", "nope"])
+        assert any("nope" in e for e in result["errors"])
+
+    def test_liquidity_report_unknown_exchange(self):
+        with _patch_exchanges():
+            result = call_tool(cex.get_cross_exchange_liquidity, "BTC/USDT", ["okx", "nope"])
+        assert result["liquidity_data"]["nope"]["error"] == "unsupported exchange"
+
+    def test_only_unknown_exchanges_is_error(self):
+        with _patch_exchanges():
+            result = call_tool(cex.get_exchange_prices, "BTC/USDT", ["nope"])
+        assert result["status"] == "error"
+
+
+class TestGeoBlockFallback:
+    def _blocked_binance(self):
+        ex = _make_mock_exchange()
+        err = ccxt.ExchangeNotAvailable("binance GET https://api.binance.com 451 Service unavailable from a restricted location")
+        ex.fetch_ohlcv.side_effect = err
+        ex.fetch_order_book.side_effect = err
+        return ex
+
+    def test_ohlcv_falls_back_and_reports_venue(self):
+        okx = _make_mock_exchange()
+        venues = dict(MOCK_EXCHANGES, binance=self._blocked_binance())
+
+        def fake_fallback(fn, exchanges=None, market="spot"):
+            assert "binance" not in exchanges
+            return fn(okx), "okx", []
+
+        with patch("crypto_exchange_ccxt_ultra.EXCHANGES", venues), \
+             patch("crypto_exchange_ccxt_ultra.fetch_with_fallback", side_effect=fake_fallback), \
+             patch("crypto_exchange_ccxt_ultra.mark_blocked") as mb:
+            result = call_tool(cex.fetch_ohlcv_data, "1h", "binance", "BTC/USDT")
+        assert result["status"] == "success"
+        assert result["exchange"] == "binance"
+        assert result["exchange_used"] == "okx"
+        assert result["fallback_from"] == "binance"
+        assert "451" in result["fallback_errors"][0]
+        mb.assert_called_once_with("binance")
+
+    def test_orderbook_falls_back(self):
+        okx = _make_mock_exchange()
+        venues = dict(MOCK_EXCHANGES, binance=self._blocked_binance())
+        with patch("crypto_exchange_ccxt_ultra.EXCHANGES", venues), \
+             patch("crypto_exchange_ccxt_ultra.fetch_with_fallback",
+                   side_effect=lambda fn, exchanges=None, market="spot": (fn(okx), "okx", [])), \
+             patch("crypto_exchange_ccxt_ultra.mark_blocked"):
+            result = call_tool(cex.get_orderbook_data, "BTC/USDT", "binance")
+        assert result["status"] == "success"
+        assert result["exchange_used"] == "okx"
+
+    def test_non_network_error_does_not_fall_back(self):
+        bad = _make_mock_exchange()
+        bad.fetch_ohlcv.side_effect = ValueError("boom")
+        with patch("crypto_exchange_ccxt_ultra.EXCHANGES", {"okx": bad}), \
+             patch("crypto_exchange_ccxt_ultra.fetch_with_fallback") as fwf:
+            result = call_tool(cex.fetch_ohlcv_data, "1h", "okx", "BTC/USDT")
+        assert result["status"] == "error"
+        fwf.assert_not_called()
+
+    def test_all_venues_fail_is_error(self):
+        venues = {"binance": self._blocked_binance(), "okx": _make_mock_exchange()}
+        with patch("crypto_exchange_ccxt_ultra.EXCHANGES", venues), \
+             patch("crypto_exchange_ccxt_ultra.fetch_with_fallback",
+                   side_effect=RuntimeError("all exchanges failed")), \
+             patch("crypto_exchange_ccxt_ultra.mark_blocked"):
+            result = call_tool(cex.fetch_ohlcv_data, "1h", "binance", "BTC/USDT")
+        assert result["status"] == "error"
+        assert "all exchanges failed" in result["error"]
+
+
+def test_serializer_handles_numpy():
+    import numpy as np
+    out = cex._tool_serializer({"a": np.float64(1.5), "b": np.bool_(True), "c": float("nan")})
+    assert out == '{"a": 1.5, "b": true, "c": null}'

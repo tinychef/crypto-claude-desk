@@ -124,6 +124,11 @@ class TestValidateExchange:
         for ex in SUPPORTED_EXCHANGES:
             assert validate_exchange(ex) == ex
 
+    def test_v2_priority_venues_supported(self):
+        # Regression: okx/coinbase are the cloud-reachable venues (binance is geo-blocked)
+        for ex in ("okx", "kraken", "coinbase"):
+            assert validate_exchange(ex.upper()) == ex
+
 
 # ---------------------------------------------------------------------------
 # validate_positive_int

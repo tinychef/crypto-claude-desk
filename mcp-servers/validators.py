@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 # Supported exchanges across the system
 SUPPORTED_EXCHANGES = {
-    "binance", "kraken", "bitfinex", "kucoin", "mexc",
-    "bybit", "okx", "bitget"
+    "okx", "kraken", "coinbase", "kucoin", "mexc", "bitfinex",
+    "binance", "bybit", "bitget"
 }
 
 # Valid symbol pattern: 1-10 uppercase letters

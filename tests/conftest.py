@@ -179,9 +179,12 @@ def mock_funding_rate_history():
 
 @pytest.fixture
 def mock_open_interest():
-    """Mock open interest response."""
+    """Mock open interest response (ccxt unified fields).
+
+    openInterestAmount = contracts / base units, openInterestValue = USD notional.
+    """
     return {
-        "openInterestAmount": 5_000_000_000,
-        "openInterestValue": 50000,
+        "openInterestAmount": 50000,
+        "openInterestValue": 5_000_000_000,
         "timestamp": 1740000000000,
     }

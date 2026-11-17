@@ -5,17 +5,51 @@ Market metadata: prices, rankings, history, global stats, fear/greed, dominance.
 """
 
 from fastmcp import FastMCP
-import requests
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
+import os
 
+from desk_common import tool_serializer, http_get_json, HttpError, get_key
 from validators import validate_coin_id, validate_positive_int
 
 logger = logging.getLogger(__name__)
 
 # Initialize FastMCP server
-mcp = FastMCP("crypto-ultra-simple")
+mcp = FastMCP("crypto-ultra-simple", tool_serializer=tool_serializer)
+
+CG_PUBLIC_BASE = "https://api.coingecko.com/api/v3"
+CG_PRO_BASE = "https://pro-api.coingecko.com/api/v3"
+FNG_URL = "https://api.alternative.me/fng/"
+
+# Cache TTLs (seconds): CoinGecko's free tier rate-limits hard (429), so cache aggressively.
+TTL_PRICE = 30
+TTL_MARKET = 120
+TTL_SLOW = 900
+
+
+def _cg_config() -> Dict[str, Any]:
+    """Base URL + auth header for CoinGecko.
+
+    - DESK_COINGECKO_KEY (or COINGECKO_API_KEY) set -> free demo key header ``x-cg-demo-api-key``
+    - plus DESK_COINGECKO_PRO=1 -> pro base URL + ``x-cg-pro-api-key``
+    - no key -> public keyless API (cloud proxy may still inject a header secret)
+    """
+    key = get_key("COINGECKO")
+    pro = os.environ.get("DESK_COINGECKO_PRO", "").strip().lower() in ("1", "true", "yes")
+    if key and pro:
+        return {"base": CG_PRO_BASE, "headers": {"x-cg-pro-api-key": key}}
+    if key:
+        return {"base": CG_PUBLIC_BASE, "headers": {"x-cg-demo-api-key": key}}
+    return {"base": CG_PUBLIC_BASE, "headers": None}
+
+
+def _cg_get(url: str, params: Optional[Dict[str, Any]] = None, ttl: float = TTL_MARKET) -> Any:
+    """Cached, retrying (429/5xx backoff) CoinGecko GET via desk_common.http_get_json."""
+    cfg = _cg_config()
+    if url.startswith(CG_PUBLIC_BASE):
+        url = cfg["base"] + url[len(CG_PUBLIC_BASE):]
+    return http_get_json(url, params=params, headers=cfg["headers"], ttl=ttl)
 
 
 @mcp.tool()
@@ -25,9 +59,7 @@ def get_bitcoin_price() -> dict:
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {"ids": "bitcoin", "vs_currencies": "usd"}
 
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = _cg_get(url, params=params, ttl=TTL_PRICE)
 
         return {
             "bitcoin_price_usd": data["bitcoin"]["usd"],
@@ -49,9 +81,7 @@ def get_crypto_prices(coins: str = "bitcoin,ethereum") -> dict:
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {"ids": coins, "vs_currencies": "usd", "include_24hr_change": "true"}
 
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = _cg_get(url, params=params, ttl=TTL_PRICE)
 
         return {
             "prices": data,
@@ -75,9 +105,7 @@ def get_coin_details(coin_id: str = "bitcoin") -> dict:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
         params = {"localization": "false", "tickers": "false", "community_data": "false", "developer_data": "false"}
 
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+        data = _cg_get(url, params=params, ttl=TTL_MARKET)
 
         return {
             "coin_details": {
@@ -125,9 +153,7 @@ def get_market_rankings(limit: int = 50) -> dict:
             "sparkline": "false"
         }
 
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+        data = _cg_get(url, params=params, ttl=TTL_MARKET)
 
         rankings = []
         for coin in data:
@@ -167,9 +193,7 @@ def get_price_history(coin_id: str = "bitcoin", days: int = 30) -> dict:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         params = {"vs_currency": "usd", "days": days}
 
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+        data = _cg_get(url, params=params, ttl=TTL_MARKET)
 
         prices = data.get("prices", [])
         volumes = data.get("total_volumes", [])
@@ -222,15 +246,11 @@ def get_price_history(coin_id: str = "bitcoin", days: int = 30) -> dict:
 def get_market_trends() -> dict:
     """Get general market trends and statistics"""
     try:
-        global_url = "https://api.coingecko.com/api/v3/global"
-        global_response = requests.get(global_url, timeout=10)
-        global_response.raise_for_status()
-        global_data = global_response.json().get("data", {})
+        global_url = f"{CG_PUBLIC_BASE}/global"
+        global_data = (_cg_get(global_url, ttl=TTL_MARKET) or {}).get("data", {})
 
-        trending_url = "https://api.coingecko.com/api/v3/search/trending"
-        trending_response = requests.get(trending_url, timeout=10)
-        trending_response.raise_for_status()
-        trending_data = trending_response.json()
+        trending_url = f"{CG_PUBLIC_BASE}/search/trending"
+        trending_data = _cg_get(trending_url, ttl=TTL_SLOW)
 
         trending_coins = []
         for coin in trending_data.get("coins", [])[:10]:
@@ -277,9 +297,7 @@ def compare_crypto_performance(coins_list: str = "bitcoin,ethereum,cardano") -> 
             "include_market_cap": "true"
         }
 
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
+        data = _cg_get(url, params=params, ttl=TTL_PRICE)
 
         comparison = []
         for coin_id, coin_data in data.items():
@@ -292,7 +310,7 @@ def compare_crypto_performance(coins_list: str = "bitcoin,ethereum,cardano") -> 
                 "change_30d_pct": coin_data.get("usd_30d_change")
             })
 
-        comparison.sort(key=lambda x: x.get("change_24h_pct", 0), reverse=True)
+        comparison.sort(key=lambda x: x.get("change_24h_pct") or 0, reverse=True)
 
         best_24h = comparison[0] if comparison else None
         worst_24h = comparison[-1] if comparison else None
@@ -318,9 +336,7 @@ def get_global_market_stats() -> dict:
     """Get comprehensive global cryptocurrency market statistics"""
     try:
         url = "https://api.coingecko.com/api/v3/global"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json().get("data", {})
+        data = (_cg_get(url, ttl=TTL_MARKET) or {}).get("data", {})
 
         return {
             "global_market_stats": {
@@ -334,7 +350,7 @@ def get_global_market_stats() -> dict:
                 "ongoing_icos": data.get("ongoing_icos"),
                 "ended_icos": data.get("ended_icos"),
                 "markets": data.get("markets"),
-                "market_cap_change_24h_usd": data.get("total_market_cap", {}).get("usd", 0) * (data.get("market_cap_change_percentage_24h_usd", 0) / 100)
+                "market_cap_change_24h_usd": (data.get("total_market_cap", {}).get("usd") or 0) * ((data.get("market_cap_change_percentage_24h_usd") or 0) / 100)
             },
             "status": "success"
         }
@@ -351,12 +367,10 @@ def get_global_market_stats() -> dict:
 def get_fear_greed_index() -> dict:
     """Get crypto Fear & Greed Index from alternative.me"""
     try:
-        url = "https://api.alternative.me/fng/"
+        url = FNG_URL
         params = {"limit": 30}
 
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = http_get_json(url, params=params, ttl=TTL_SLOW)
 
         if "data" not in data:
             raise Exception("No data in Fear & Greed API response")
@@ -404,9 +418,7 @@ def get_dominance_stats() -> dict:
     """Get Bitcoin and Ethereum market dominance statistics"""
     try:
         url = "https://api.coingecko.com/api/v3/global"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json().get("data", {})
+        data = (_cg_get(url, ttl=TTL_MARKET) or {}).get("data", {})
 
         btc_dominance = data.get("market_cap_percentage", {}).get("btc", 0)
         eth_dominance = data.get("market_cap_percentage", {}).get("eth", 0)
@@ -440,12 +452,10 @@ def get_dominance_stats() -> dict:
 def get_crypto_categories() -> dict:
     """Get cryptocurrency categories (DeFi, Layer1, Meme coins, etc.)"""
     try:
-        categories_url = "https://api.coingecko.com/api/v3/coins/categories"
-        response = requests.get(categories_url, timeout=15)
-        response.raise_for_status()
-        categories_data = response.json()
+        categories_url = f"{CG_PUBLIC_BASE}/coins/categories"
+        categories_data = _cg_get(categories_url, ttl=TTL_SLOW)
 
-        categories_sorted = sorted(categories_data, key=lambda x: x.get("market_cap", 0), reverse=True)
+        categories_sorted = sorted(categories_data, key=lambda x: x.get("market_cap") or 0, reverse=True)
         top_categories = categories_sorted[:20]
 
         categories_info = []
@@ -480,7 +490,7 @@ def get_crypto_categories() -> dict:
                 "key_categories": key_categories,
                 "market_overview": {
                     "largest_category": categories_info[0] if categories_info else None,
-                    "fastest_growing_24h": max(categories_info, key=lambda x: x.get("market_cap_change_24h_pct", 0)) if categories_info else None
+                    "fastest_growing_24h": max(categories_info, key=lambda x: x.get("market_cap_change_24h_pct") or 0) if categories_info else None
                 }
             },
             "status": "success"
