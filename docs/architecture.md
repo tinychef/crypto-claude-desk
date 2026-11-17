@@ -4,6 +4,8 @@ Technical deep-dive into the Crypto Trading Desk multi-agent system.
 
 ---
 
+> **V2 note (2026-11):** the authoritative routing, agent, server and skill tables now live in `CLAUDE.md`. V2 adds the `macro-flows` and `quant-scanner` agents, 6 MCP servers built on `mcp-servers/desk_common/` (shared HTTP cache/backoff/proxy + ccxt geo-block fallback), DB tables `orders` / `kill_switches` / `watchlist` / `regime_snapshots`, and the output contract in `docs/output-format.md`. Book limits follow the Two Books table (spot: max 5 open, 80% allocated; futures: max 3 open, 30% margin). The older "max 3 trades / 50% allocated" rule below is superseded. Some per-agent tool tables below describe V1.
+
 ## Routing Logic
 
 The coordinator (Claude Code main conversation) reads `CLAUDE.md` and classifies every user query into one of four routing paths.

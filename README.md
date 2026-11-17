@@ -14,6 +14,23 @@ This project proves it. One plugin turns Claude Code into a full crypto trading 
 
 ---
 
+## Novedades V2 (fork tinychef)
+
+Esta versión personalizada amplía el desk original con:
+
+- **Más datos (6 servidores MCP nuevos, 15 en total, 144 herramientas):**
+  - `crypto-derivatives`: OI y liquidaciones agregadas, opciones de Deribit (DVOL, put/call, skew, max pain), basis, Hyperliquid y posicionamiento de OKX.
+  - `crypto-macro`: DXY, tipos, M2, SPX/NDX, oro, probabilidades de la Fed y calendario macro.
+  - `crypto-flows`: flujos de ETF, Coinbase premium, Kimchi premium y stablecoins.
+  - `crypto-onchain`: MVRV, NVT, actividad y netflows (de pago).
+  - `crypto-intel`: RSS, CryptoPanic, Reddit/LunarCrush y desbloqueos.
+  - `crypto-quant`: régimen, amplitud, rotación de sectores, fuerza relativa, tasas base de comportamiento, estacionalidad y correlaciones.
+- **Datos fiables desde la nube:** capa común `desk_common` con proxy, caché, backoff y fallback por geobloqueo (OKX primero; Binance y Bybit bloquean IPs de EE. UU.). Corrige soportes/resistencias, OI, búsqueda de Polymarket y los 429 de CoinGecko.
+- **Respuestas breves y accionables en español** (`docs/output-format.md`): veredicto, tabla de acciones, razones con datos, triggers y kill-switches, en ≤ 25 líneas.
+- **Órdenes pendientes y kill-switches persistentes** en SQLite: `/monitor` las ejecuta, caduca y vigila.
+- **Agentes nuevos** `macro-flows` y `quant-scanner`. **Skills nuevas** `/brief`, `/scan`, `/macro` y `/orders`, y workflows `daily-brief` y `alt-scan`.
+- Fuentes, keys, costes y allowlist de red para la nube: **`docs/data-sources.md`**.
+
 ## Install
 
 ### Option A: As a plugin (recommended for users)
@@ -48,7 +65,7 @@ Then run setup once:
 /crypto-trading-desk:setup
 ```
 
-Setup detects your OS (macOS, Linux, or Windows), installs [uv](https://docs.astral.sh/uv/) if missing, downloads Python dependencies, verifies all 9 MCP servers work, and reports status. Takes ~30 seconds. You only need to do this once.
+Setup detects your OS (macOS, Linux, or Windows), installs [uv](https://docs.astral.sh/uv/) if missing, downloads Python dependencies, verifies all 15 MCP servers work, and reports status. Takes ~30 seconds. You only need to do this once.
 
 ### First thing to try
 
@@ -135,7 +152,7 @@ Phase 3 (~60 sec)
 
 Each agent writes a report file. The next phase reads those files. No message passing — just files on disk.
 
-### 95 MCP tools across 9 servers
+### 144 MCP tools across 15 servers (V2)
 
 | Server | Tools | What it provides |
 |--------|-------|-----------------|
@@ -312,7 +329,7 @@ crypto-trading-desk/
 ├── bin/                         # autopilot.sh wrapper for cron/headless execution
 ├── skills/                      # 8 slash commands (setup, quick, analyze, portfolio, close-trade, validate-predictions, monitor, create)
 ├── hooks/                       # SessionStart: creates data directories
-├── mcp-servers/                 # 9 Python MCP servers (95 tools total)
+├── mcp-servers/                 # 15 Python MCP servers (144 tools) + desk_common/
 ├── mcp-servers.plugin.json      # MCP config for plugin distribution
 ├── .claude/workflows/           # Dynamic workflows (e.g. close-learning)
 ├── dashboard/                   # Next.js ops dashboard (reads the DB read-only, localhost only)

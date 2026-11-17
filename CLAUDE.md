@@ -1,6 +1,7 @@
-# Crypto Trading Desk - Multi-Agent Intelligence System
+# Crypto Trading Desk V2 - Multi-Agent Intelligence System
 
 A cryptocurrency analysis system built with Claude Code's native features: agents, MCP servers, and skills.
+**V2:** more data (derivatives, options, macro, ETF flows, on-chain, news), more analysis (regime, breadth, rotation, behavior base rates), persistent pending orders + kill switches, and **short, action-first answers in Spanish** (see `docs/output-format.md`).
 
 ## Architecture
 
@@ -14,35 +15,46 @@ User Query
     |
     +-- QUICK (1 subagent) ----------> market-monitor (haiku)
     |
+    +-- BRIEF (3 parallel) ----------> market-monitor + macro-flows + quant-scanner  (/brief)
+    |
     +-- STANDARD (2-3 parallel) -----> market-monitor + technical-analyst + news-sentiment
     |
-    +-- FULL ANALYSIS (5 subagents) -> 3 phases with file-based coordination
-         Phase 1 (parallel): market-monitor || technical-analyst || news-sentiment
+    +-- FULL ANALYSIS (6-7 subagents) -> 3 phases with file-based coordination
+         Phase 1 (parallel): market-monitor || technical-analyst || news-sentiment || macro-flows [|| quant-scanner if --alts]
          Phase 2 (sequential): risk-specialist (reads Phase 1 files)
-         Phase 3 (sequential): portfolio-manager (reads all, decides)
+         Phase 3 (sequential): portfolio-manager (reads all, decides, persists orders + kill switches)
 ```
 
 ## How to Use
 
 ### First-Time Setup
-- `/setup` - **Run once after installing.** Detects environment, installs uv + Python deps, verifies MCP servers work. Cross-platform (macOS, Linux, Windows).
+- `/setup` - **Run once after installing.** Detects environment, installs uv + Python deps, verifies the 15 MCP servers work. Cross-platform (macOS, Linux, Windows).
+- Optional API keys and cloud network allowlist: see `docs/data-sources.md`.
 
 ### Slash Commands
-- `/quick BTC` - Fast market snapshot (1 agent, ~15 sec)
-- `/analyze BTC` - Full 5-agent analysis with trading decision (~3-5 min)
-- `/portfolio` - View portfolio status and open trades
+- `/brief` - Daily brief: regime, BTC, top 3 opportunities, pending orders, 7-day calendar (≤25 lines)
+- `/quick BTC` - Fast market snapshot (1 agent, ≤6 lines)
+- `/analyze BTC` - Full phased analysis with trading decision (`--alts` adds the alt scanner, `--full` adds detail)
+- `/scan` - Altcoin opportunity scanner (quant-scanner → risk → portfolio-manager)
+- `/macro` - Macro + flows + options read: tailwind or headwind
+- `/orders` - Pending orders, kill switches and watchlist (list / cancel)
+- `/portfolio` - Portfolio status, open trades and pending orders
 - `/close-trade trade_001` - Close trade with post-mortem
 - `/validate-predictions` - Review pending predictions against market data
-- `/monitor` - Autonomous loop: check SL/TP, close trades, evaluate predictions
+- `/monitor` - Autonomous loop: regime snapshot, kill switches, SL/TP, pending-order fills/expiry, predictions
 - `/create` - Extend the system with new components
 
 ### Natural Language
 Ask naturally and the coordinator routes by complexity:
 - "How's BTC?" → Quick (market-monitor only)
+- "What should I do today?" / "brief" → /brief
 - "RSI of ETH?" → Standard (technical-analyst only)
 - "Analyze SOL" → Standard (2-3 agents)
-- "Full analysis of BTC with recommendation" → Full (5 agents in phases)
-- "Check my portfolio" → portfolio-manager
+- "Full analysis of BTC with recommendation" / "should I buy?" → Full (phases)
+- "Which altcoins look good?" → /scan
+- "Is macro a headwind?" / "ETF flows?" → macro-flows
+- "Market regime? behavior after crashes?" → quant-scanner
+- "Check my portfolio" / "my orders" → portfolio-manager / /orders
 - "Post-mortem on trade_003" → learning-agent
 
 ## Routing Rules
@@ -62,8 +74,10 @@ Use for simple data points. One agent, fast response.
 |-----------|------|-------|-----------------------------------|
 | Price, volume, market overview | market-monitor | haiku | crypto-exchange, crypto-data, crypto-futures |
 | RSI, MACD, indicators, patterns | technical-analyst | sonnet | crypto-technical, crypto-advanced-indicators |
-| News, sentiment, FUD/FOMO | news-sentiment | sonnet | WebSearch, WebFetch (no MCP needed) |
-| Portfolio status, trade history | portfolio-manager | opus | crypto-learning-db, crypto-exchange |
+| News, sentiment, FUD/FOMO, unlocks | news-sentiment | sonnet | crypto-intel, crypto-polymarket, WebSearch |
+| Macro, ETF flows, options, Fed odds | macro-flows | sonnet | crypto-macro, crypto-flows, crypto-derivatives, crypto-onchain |
+| Regime, breadth, rotation, base rates, alt scan | quant-scanner | sonnet | crypto-quant, crypto-exchange, crypto-intel |
+| Portfolio status, trade history, orders | portfolio-manager | opus | crypto-learning-db, crypto-exchange |
 | Pattern lookup, pre-trade check | learning-agent | opus | crypto-learning-db, crypto-data |
 
 Example delegation:
@@ -77,16 +91,18 @@ Launch 3 Tasks in parallel (all `subagent_type: general-purpose`):
 - market-monitor (model: haiku) + technical-analyst (model: sonnet) + news-sentiment (model: sonnet)
 - Coordinator synthesizes results
 
-### Full Analysis with Decision (5 subagents in phases)
+### Full Analysis with Decision (6-7 subagents in phases)
 Use for "full analysis", "should I buy", "recommendation", or `/analyze`.
-Spawn 5 subagents via the Task tool in **3 sequential phases** (see `/analyze` skill for detailed prompts):
+Spawn subagents via the Task tool in **3 sequential phases** (see `/analyze` skill for detailed prompts):
 
-**Phase 1 - Data Gathering (3 Tasks in parallel):**
+**Phase 1 - Data Gathering (4-5 Tasks in parallel):**
 - market-monitor (haiku) → `data/reports/YYYY-MM-DD-{symbol}/market-data.md`
 - technical-analyst (sonnet) → `data/reports/YYYY-MM-DD-{symbol}/technical-analysis.md`
 - news-sentiment (sonnet) → `data/reports/YYYY-MM-DD-{symbol}/news-sentiment.md`
+- macro-flows (sonnet) → `data/reports/YYYY-MM-DD-{symbol}/macro-flows.md`
+- quant-scanner (sonnet, only with `--alts` or several symbols) → `data/reports/YYYY-MM-DD-{symbol}/alt-scan.md`
 
-**Wait for all 3 Task calls to return. Verify files exist on disk.**
+**Wait for all Phase 1 Task calls to return. Verify files exist on disk.**
 
 **Phase 2 - Risk Assessment (1 Task AFTER Phase 1):**
 - risk-specialist (sonnet) reads Phase 1 files → `data/reports/YYYY-MM-DD-{symbol}/risk-assessment.md`
@@ -95,15 +111,19 @@ Spawn 5 subagents via the Task tool in **3 sequential phases** (see `/analyze` s
 
 **Phase 3 - Decision (1 Task AFTER Phase 2):**
 - portfolio-manager (opus) reads all files → `data/reports/YYYY-MM-DD-{symbol}/decision.md`
+- WAIT decisions with limit entries are persisted with `place_order` + `add_kill_switch` (not prose).
 
-**IMPORTANT:** Do NOT spawn all 5 agents at once. Phase 2/3 agents MUST read files written by previous phases. Spawn them only after confirming previous phase files exist on disk.
+**Phase 5 - Brief:** the coordinator writes `brief.md` and answers the user with the brief only (`docs/output-format.md` §3).
+
+**IMPORTANT:** Do NOT spawn all agents at once. Phase 2/3 agents MUST read files written by previous phases. Spawn them only after confirming previous phase files exist on disk.
 
 ### Special Queries (single subagent)
 - "Close trade X" → portfolio-manager (close) + learning-agent (post-mortem + prediction validation)
 - "What patterns have we seen?" → learning-agent
 - "Check my predictions" → learning-agent via /validate-predictions
 - "Risk on my position?" → risk-specialist
-- "Monitor my trades" / "Check SL/TP" → /monitor (multi-agent coordination)
+- "Monitor my trades" / "Check SL/TP" / "did my orders fill?" → /monitor (multi-agent coordination)
+- "Cancel order X" / "show kill switches" → /orders
 - "Create a new MCP/agent/skill" → system-builder via /create
 
 ## Delegation Rules
@@ -140,50 +160,64 @@ The portfolio is split into TWO BOOKS with different mandates. Whenever you disc
 
 See `agents/portfolio-manager.md` § "Two Books, Two Mindsets" for the full rules.
 
-## Agents (7)
+## Agents (9)
 
-| Agent | Role | Model | MCPs | Native Tools |
-|-------|------|-------|------|-------------|
-| market-monitor | Fast market data, whale alerts, arbitrage scan | haiku | data, futures, exchange | WebSearch, Read |
-| technical-analyst | Indicators, patterns, signals | sonnet | technical, advanced-indicators, exchange, data, learning-db | WebSearch, Read |
-| news-sentiment | News + social sentiment + crowd psychology + market-priced consensus | sonnet | learning-db, polymarket | WebSearch, WebFetch, Read |
-| risk-specialist | Risk, volatility, microstructure, institutional flows, on-chain capital flows | sonnet | technical, microstructure, data, exchange, learning-db, defillama | WebSearch, Read |
-| portfolio-manager | Final decisions + trade execution + Polymarket/on-chain sanity check | opus | data, learning-db, polymarket, defillama | Read, Grep, Write |
-| learning-agent | Predictions, patterns, post-mortem | opus | data, learning-db | Read, Grep, Write |
-| system-builder | Generate new MCP servers, agents, skills + tests | opus | (none) | Read, Write, Grep, Glob, WebSearch, WebFetch |
+| Agent | Role | Model | MCPs |
+|-------|------|-------|------|
+| market-monitor | Fast market data, derivatives color, flows, whale alerts | haiku | data, futures, exchange, derivatives, flows |
+| technical-analyst | Regime-aware indicators, levels, setups with ATR-based stops | sonnet | technical, advanced-indicators, exchange, data, quant, learning-db |
+| news-sentiment | News feeds, social pulse, unlocks, crowd psychology, event odds | sonnet | intel, polymarket, learning-db (+ WebSearch) |
+| macro-flows | Macro (rates, DXY, equities), ETF flows, stablecoins, options, Fed odds, calendar → tailwind/headwind | sonnet | macro, flows, derivatives, onchain, polymarket, defillama |
+| quant-scanner | Regime, breadth, sector rotation, relative strength, behavior base rates, seasonality, alt shortlist | sonnet | quant, exchange, technical, futures, derivatives, intel, learning-db |
+| risk-specialist | Volatility, options/liquidation risk, correlation, microstructure, on-chain; flags SL < 1×ATR | sonnet | technical, microstructure, derivatives, quant, onchain, flows, data, exchange, learning-db, defillama |
+| portfolio-manager | Final decisions, book selection, persists trades / pending orders / kill switches | opus | data, learning-db, polymarket, defillama, quant |
+| learning-agent | Predictions (trade/order/decision/scan), order fills, patterns, post-mortems | opus | data, learning-db |
+| system-builder | Generate new MCP servers (on `desk_common`), agents, skills + tests | opus | (none) |
 
-## MCP Servers (9)
+## MCP Servers (15 servers, 144 tools)
 
 | Server | Tools | Data Source |
 |--------|-------|-------------|
-| crypto-data | 11 | CoinGecko API (market metadata: fear/greed, dominance, rankings — NOT for live prices) |
-| crypto-exchange | 15 | CCXT multi-exchange (orderbooks, OHLCV, volume, arbitrage) |
-| crypto-technical | 14 | CCXT + calculated (RSI, MACD, Bollinger, patterns, signals) |
-| crypto-futures | 10 | CCXT futures (funding rates, OI, long/short, liquidations) |
+| crypto-data | 11 | CoinGecko (fear/greed, dominance, rankings — NOT live prices); cached + optional demo key |
+| crypto-exchange | 15 | CCXT multi-exchange, OKX first (orderbooks, OHLCV, volume, arbitrage) |
+| crypto-technical | 14 | CCXT + calculated (RSI, MACD, Bollinger, typed S/R, patterns, signals) |
+| crypto-futures | 11 | CCXT futures + OKX Rubik (funding, OI, long/short, taker ratio, liquidation levels) |
 | crypto-advanced-indicators | 8 | CCXT (OBV, MFI, ADX, Ichimoku, VWAP, Pivot Points) |
 | crypto-market-microstructure | 6 | CCXT (orderbook depth, imbalance, spoofing, market impact) |
-| crypto-learning-db | 18 | SQLite (trades, predictions, patterns, summaries, track records, trade modifications) |
-| crypto-polymarket | 6 | Polymarket Gamma API (prediction market probabilities — wisdom of crowds priced in real capital) |
-| crypto-defillama | 7 | DefiLlama API (TVL by chain/protocol, stablecoin supply, DEX volume, on-chain capital flows) |
+| crypto-learning-db | 34 | SQLite (trades, predictions, patterns, summaries, **orders, watchlist, kill switches, regime snapshots**) |
+| crypto-polymarket | 6 | Polymarket Gamma (event probabilities; real search + crypto tag filter) |
+| crypto-defillama | 7 | DefiLlama (TVL, stablecoins, DEX volume) |
+| crypto-derivatives | 7 | Coinalyze (aggregated OI/liquidations), Deribit (options: DVOL, put/call, skew, max pain), OKX basis + Rubik, Hyperliquid |
+| crypto-macro | 4 | FRED + Stooq (DXY, yields, M2, SPX/NDX, gold), BTC-macro correlation, Fed odds (Polymarket/Kalshi), macro calendar |
+| crypto-flows | 4 | ETF flows (Farside/SoSoValue), Coinbase premium, Kimchi premium, stablecoin mint/burn |
+| crypto-onchain | 4 | CoinMetrics (MVRV, NVT, activity), mempool.space; CryptoQuant/Glassnode netflows (paid) |
+| crypto-intel | 4 | RSS headlines, CryptoPanic, Reddit/LunarCrush social, token unlocks |
+| crypto-quant | 9 | Local analytics on OKX OHLCV: regime, breadth, RS scan, sector rotation, behavior base rates, seasonality, correlation, vol regime, beta |
 
-> **Note:** News and sentiment analysis uses WebSearch + WebFetch directly (Claude's native web intelligence) instead of MCP. This provides real-time breaking news, social sentiment from Twitter/Reddit, and semantic understanding superior to RSS-based keyword matching.
+All servers share `mcp-servers/desk_common/` (proxy-aware cached HTTP, ccxt factory with geo-block fallback, serializer). Any tool may return `status: "unavailable"` (missing key / host not allowed) — agents report it as a data gap and never invent the number. Providers, keys, costs and the cloud allowlist: `docs/data-sources.md`.
 
-## Skills (8)
+## Skills (12)
 
 | Skill | Usage | Description |
 |-------|-------|-------------|
 | `/setup` | `/setup` | First-time environment setup (cross-platform) |
-| `/analyze` | `/analyze BTC` | Full 5-agent phased analysis with decision |
-| `/quick` | `/quick ETH` | Fast single-agent market check |
-| `/portfolio` | `/portfolio` | Portfolio status and open trades |
+| `/brief` | `/brief` | Daily brief: regime + BTC + top 3 opportunities + orders + calendar (≤25 lines) |
+| `/analyze` | `/analyze BTC [--alts] [--full]` | Full phased analysis with decision → `brief.md` |
+| `/quick` | `/quick ETH` | Fast single-agent market check (≤6 lines) |
+| `/scan` | `/scan [N or symbols]` | Altcoin scanner → risk → decision with persisted orders |
+| `/macro` | `/macro` | Macro / flows / options tailwind-headwind read |
+| `/orders` | `/orders [cancel order_001]` | Pending orders, kill switches, watchlist |
+| `/portfolio` | `/portfolio` | Portfolio status, open trades, pending orders |
 | `/close-trade` | `/close-trade trade_001` | Close trade with post-mortem + learning |
 | `/validate-predictions` | `/validate-predictions` | Review pending predictions against market data |
-| `/monitor` | `/monitor` | Autonomous loop: check SL/TP, close trades, evaluate predictions, generate summaries |
+| `/monitor` | `/monitor` | Regime snapshot, kill switches, SL/TP, order fills/expiry, predictions, summaries |
 | `/create` | `/create a DeFi tracker` | Extend the system with new components (+ tests for MCP servers) |
+
+Workflow scripts (Workflow tool): `.claude/workflows/daily-brief.js`, `.claude/workflows/alt-scan.js`, `.claude/workflows/close-learning.js`.
 
 ## Design Decisions
 
-1. **Hybrid routing** — Quick queries use single subagents (cheap, fast). Full analysis uses 5 phased subagents (parallel where possible, sequential where needed).
+1. **Hybrid routing** — Quick queries use single subagents (cheap, fast). Full analysis uses 6-7 phased subagents (parallel where possible, sequential where needed).
 2. **Model optimization** — haiku for data scouts, sonnet for analysis, opus for final decisions. ~40-60% token savings vs all-sonnet. Model is passed explicitly via Task `model` parameter.
 3. **General-purpose subagents** — All agents use `subagent_type: general-purpose` to inherit MCP tools. Plugin agent types don't pass MCP tools to subagents ([Claude Code #4476](https://github.com/anthropics/claude-code/issues/4476)). Agent `.md` files define the analysis framework; the coordinator includes their instructions in the Task prompt.
 4. **Persistent memory** — portfolio-manager and learning-agent use `memory: project` to build institutional knowledge across sessions.
@@ -206,6 +240,10 @@ The system learns from every trade through a **SQLite-backed cognitive memory** 
 | `patterns` | Named trading patterns with win rates |
 | `summaries` | Monthly/quarterly performance summaries |
 | `portfolio_state` | Current balances and aggregate stats |
+| `orders` | Pending limit/stop/conditional orders with SL/TPs, expiry and fill link (V2) |
+| `kill_switches` | Measurable portfolio rules (e.g. `btc_daily_close < 61600`) evaluated by /monitor (V2) |
+| `watchlist` | Symbols with thesis, levels and review date (V2) |
+| `regime_snapshots` | Periodic BTC regime / breadth / F&G / funding / macro snapshot (V2) |
 
 ### Three Learning Layers
 
@@ -224,25 +262,29 @@ The system learns through **natural language reasoning, not formulas**. MCP tool
 
 ### Learning Loop
 
-Open trade → `record_trade()` + `record_prediction()` → close trade → `close_trade()` + `validate_prediction(evaluation="...")` → NL evaluation stored → `upsert_pattern()` → `generate_summary()` periodically → next trade: `get_prediction_track_record()` returns setup accuracy + evaluations → agent reasons about setup reliability → `find_expired_predictions()` catches missed validations.
+Decision → `place_order()` + `add_kill_switch()` + `record_prediction(source='decision')` → `/monitor` fills (`fill_order`) or expires orders → open trade → `record_trade()` + `record_prediction()` → close trade → `close_trade()` + `validate_prediction(evaluation="...")` → NL evaluation stored → `upsert_pattern()` → `generate_summary()` periodically → next trade: `get_prediction_track_record()` returns setup accuracy + evaluations → agent reasons about setup reliability → `find_expired_predictions()` catches missed validations.
 
 ## Headless / Autopilot Mode
 
 Skills are **NOT** invoked via `/skill-name` in `-p` (print) mode. For scheduled execution via cron, use `bin/autopilot.sh` which maps workflow names to detailed natural language prompts:
 
 ```bash
-./bin/autopilot.sh monitor           # Check SL/TP, close trades, evaluate
+./bin/autopilot.sh brief             # Daily brief (regime, BTC, top 3, orders, calendar)
+./bin/autopilot.sh monitor           # Kill switches, SL/TP, pending orders, predictions
+./bin/autopilot.sh scan              # Altcoin scanner with decision
 ./bin/autopilot.sh quick "BTC ETH"   # Fast market snapshot
-./bin/autopilot.sh analyze "BTC"     # Full 5-agent analysis
+./bin/autopilot.sh analyze "BTC"     # Full phased analysis
 ./bin/autopilot.sh portfolio         # Portfolio status
 ```
 
 The wrapper handles PATH, working directory, tool permissions (`--allowedTools`), and logging.
 
-## Output Guidelines
+## Output Guidelines (V2 — see `docs/output-format.md`)
 
-- Data-driven analysis with specific numbers
-- Actionable insights, not generic commentary
-- Risk parameters on every trade suggestion
-- Reports saved to `data/reports/` for full analyses
-- Learning-agent builds pattern library over time via persistent memory
+- **Answer the user in Spanish by default, short and action-first**: one-line verdict (EJECUTAR / ESPERAR / DESCARTAR / NO HACER NADA), one action table (asset, book, side, entry, SL, TPs, size, R/R, expiry), 3-5 reasons with numbers, triggers + kill switches, data gaps. ≤25 lines. Detail only on `--full` or when asked.
+- Analyst reports: ≤40 lines + JSON `signals` block; saved to `data/reports/`.
+- Every pending order has an expiry and a cancel condition, and is persisted with `place_order`.
+- Stops must sit outside daily noise (≥1×ATR) — use `volatility_regime`.
+- Use behavior base rates and regime when claiming "oversold = bounce".
+- Never invent data: `unavailable` / `error` → list under "Datos faltantes".
+- Learning-agent builds pattern library over time via persistent memory.

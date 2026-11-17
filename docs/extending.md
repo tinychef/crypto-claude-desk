@@ -159,7 +159,9 @@ Two hard-won rules:
 - **Always pass the `tool_serializer` shown above** if the server touches numpy/pandas. Without it, one numpy scalar in a result crashes the whole stdio session (`PydanticSerializationError`).
 - **Never call a `@mcp.tool()`-decorated function from another tool.** The decorator wraps it into a FastMCP object that isn't plainly callable. Put the real logic in a private `_name()` function and expose it with a thin `@mcp.tool(name="name")` wrapper (see `crypto_futures_data.py` for the pattern).
 
-### 2. Add to mcp-servers.plugin.json
+### 2. Register in mcp-servers.plugin.json and .mcp.json
+
+> **V2:** build new servers on `mcp-servers/desk_common/` (`http_get_json` with cache/backoff/proxy, `get_exchange`/`fetch_with_fallback` for ccxt, `tool_serializer`, `get_key`/`unavailable` for optional API keys). See `mcp-servers/crypto_macro.py` for a complete example. Register the server in **both** `mcp-servers.plugin.json` (plugin mode) and `.mcp.json` (local clone / cloud sessions, relative paths), and add it to `MCP_SERVERS` in `bin/autopilot.sh`.
 
 Add your server to `mcp-servers.plugin.json`:
 
@@ -168,7 +170,7 @@ Add your server to `mcp-servers.plugin.json`:
   "mcpServers": {
     "your-server-name": {
       "command": "uv",
-      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/your_server_name.py"],
+      "args": ["run", "--frozen", "--project", "${CLAUDE_PLUGIN_ROOT}", "python", "${CLAUDE_PLUGIN_ROOT}/mcp-servers/your_server_name.py"],
       "cwd": "${CLAUDE_PLUGIN_ROOT}"
     }
   }

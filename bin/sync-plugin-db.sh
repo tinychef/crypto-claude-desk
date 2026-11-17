@@ -18,7 +18,11 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_DB="$PROJECT_ROOT/data/db/learning.db"
-PLUGIN_DB="${PLUGIN_DB:-$HOME/.claude/plugins/cache/hugoguerrap/crypto-trading-desk/1.1.0/data/db/learning.db}"
+if [ -z "${PLUGIN_DB:-}" ]; then
+  # Newest installed plugin version (any marketplace owner), instead of a hardcoded version.
+  PLUGIN_DB="$(ls -1d "$HOME"/.claude/plugins/cache/*/crypto-trading-desk/*/data/db/learning.db 2>/dev/null | sort -V | tail -n 1 || true)"
+  PLUGIN_DB="${PLUGIN_DB:-$HOME/.claude/plugins/cache/hugoguerrap/crypto-trading-desk/2.0.0/data/db/learning.db}"
+fi
 
 FORCE=0
 STATUS_ONLY=0
